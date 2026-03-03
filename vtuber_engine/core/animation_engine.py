@@ -131,13 +131,13 @@ class AnimationEngine:
     def _mouth_smoothing(self, target: CharacterState) -> float:
         """
         嘴型使用动态平滑：
-        - 张嘴（说话开始）响应快
-        - 闭嘴（说话结束）稍慢，避免抖动
+        - 张嘴（说话开始）响应适中
+        - 闭嘴（说话结束）较慢，避免抖动
         """
         if target.mouth_open > self._current.mouth_open:
-            return min(1.0, self.smoothing * 2.0)  # 张嘴快
+            return min(0.6, self.smoothing * 1.5)  # 张嘴：适度快
         else:
-            return self.smoothing * 0.8  # 闭嘴慢
+            return self.smoothing * 0.5  # 闭嘴：更慢，避免抖动
 
     @staticmethod
     def _lerp(current: float, target: float, speed: float) -> float:

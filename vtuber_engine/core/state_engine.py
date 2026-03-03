@@ -5,9 +5,11 @@ State Engine — 角色状态决策核心。
   - 接收 EmotionVector（AI 输出）+ AudioFeatures
   - 输出 CharacterState（角色状态参数）
   - 管理眨眼周期
-  - 历史平滑（防止情绪跳变）
   - 基于余弦相似度匹配最佳表情
-  - 强制切换：超时后在句首切换不同表情
+  - 表情切换控制：
+    · 最短保持时间（emotion_min_hold_seconds）—— 防止表情频繁跳变
+    · 句子边界切换 —— 只在「静音→说话」的转变点切换表情
+    · 强制切换（force_switch_seconds）—— 超时后在句首强制切换不同表情
 
 不做：
   - 情绪推理（交给 Emotion Engine）
@@ -23,7 +25,7 @@ State Engine — 角色状态决策核心。
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from typing import Optional
 
 from vtuber_engine.models.data_models import (
     AudioFeatures,
@@ -43,6 +45,8 @@ class StateEngine:
         fps: int = 30,
         force_switch_seconds: float = 0.0,
         gesture_min_hold_seconds: float = 5.0,
+        emotion_min_hold_seconds: float = 5.0,
+        mouth_frequency: float = 2.5,
     ):
         """
         Args:
@@ -50,24 +54,22 @@ class StateEngine:
             fps: 帧率。
             force_switch_seconds: 强制切换表情的最长秒数（0 = 不启用）。
             gesture_min_hold_seconds: 动作切换后最小停留秒数（防止跳变）。
+            emotion_min_hold_seconds: 每个表情最少保持秒数（防止频繁切换）。
+            mouth_frequency: 嘴型开合频率 (Hz)，越低越自然。
         """
         self.config = character_config
         self.fps = fps
-
-        # 历史状态（用于平滑）
-        self._history: List[CharacterState] = []
-        self._history_window = 5  # 平滑窗口大小（帧数）
 
         # 眨眼状态
         self._blink_timer = 0.0
         self._blink_active = False
         self._blink_progress = 0.0
 
-        # 强制切换状态
+        # ── 表情切换控制 ──
         self._force_switch_seconds = force_switch_seconds
+        self._emotion_min_hold_seconds = emotion_min_hold_seconds
         self._current_emotion = ""
         self._current_emotion_frames = 0  # 当前表情持续的帧数
-        self._waiting_for_sentence_start = False  # 是否在等待句首切换点
         self._prev_is_speaking = False  # 上一帧的 is_speaking 状态
 
         # 动作（gesture）防抖状态
@@ -77,6 +79,7 @@ class StateEngine:
 
         # 嘴巴开合振荡定时器（讲话时张嘴闭嘴切换，而不是一直张嘴）
         self._mouth_timer: float = 0.0
+        self._mouth_frequency: float = mouth_frequency
 
         # 表情使用历史（用于降权，避免始终停留在同一表情）
         self._emotion_usage: dict[str, float] = {}
@@ -110,8 +113,9 @@ class StateEngine:
             f"fps={self.fps}, dt={dt:.4f}, "
             f"available_emotions={self.config.emotions}, "
             f"emotion_vectors_count={len(emotion_vectors)}, "
-            f"history_window={self._history_window}, "
+            f"emotion_min_hold={self._emotion_min_hold_seconds}s, "
             f"force_switch_seconds={self._force_switch_seconds}, "
+            f"mouth_frequency={self._mouth_frequency}Hz, "
             f"has_expression_vectors={bool(self.config.emotion_vectors)}"
         )
 
@@ -230,6 +234,73 @@ class StateEngine:
 
     # ──────────────────── 内部逻辑 ────────────────────
 
+    # ──────────────────── 表情决策（统一） ────────────────────
+
+    def _decide_emotion(
+        self,
+        emotion_vec: EmotionVector,
+        is_speaking: bool,
+    ) -> str:
+        """
+        统一的表情决策逻辑，保证表情平稳过渡：
+          1. 最短保持时间内锁定当前表情
+          2. 超过最短时间后，在句子边界（静音→说话）处允许切换
+          3. 超过强制切换时间后，在句子边界处强制切换到不同表情
+
+        "句子边界" 定义：从不说话过渡到说话的那一帧（silence → speech）。
+        """
+        # 获取 AI 匹配的理想表情
+        matched = self._match_expression_by_vector(emotion_vec)
+
+        # 首帧初始化
+        if not self._current_emotion:
+            self._current_emotion = matched
+            self._current_emotion_frames = 0
+            return matched
+
+        self._current_emotion_frames += 1
+        elapsed = self._current_emotion_frames / self.fps
+
+        # 只有 1 个表情时无需切换
+        if len(self.config.emotions) <= 1:
+            return self._current_emotion
+
+        # ── 最短保持：锁定当前表情 ──
+        if elapsed < self._emotion_min_hold_seconds:
+            return self._current_emotion
+
+        # ── 判断是否需要切换 ──
+        wants_switch = matched != self._current_emotion
+        force_mode = False
+
+        if self._force_switch_seconds > 0 and elapsed >= self._force_switch_seconds:
+            wants_switch = True
+            force_mode = True
+            # 强制切换时排除当前表情
+            if matched == self._current_emotion:
+                matched = self._match_expression_by_vector(
+                    emotion_vec, exclude_emotion=self._current_emotion
+                )
+
+        if not wants_switch:
+            return self._current_emotion
+
+        # ── 等待句子边界切换 ──
+        is_sentence_start = is_speaking and not self._prev_is_speaking
+        if is_sentence_start:
+            print(
+                f"[StateEngine] emotion_switch: '{self._current_emotion}' -> '{matched}' "
+                f"at sentence boundary (held {elapsed:.1f}s, force={force_mode})"
+            )
+            self._current_emotion = matched
+            self._current_emotion_frames = 0
+            return matched
+
+        # 还没到句子边界，保持当前表情
+        return self._current_emotion
+
+    # ──────────────────── 内部逻辑 ────────────────────
+
     def _compute_frame_state(
         self,
         emotion: EmotionVector,
@@ -241,74 +312,16 @@ class StateEngine:
 
         state = CharacterState()
 
-        # 1. 表情匹配（通过余弦相似度或 dominant 回退）
-        matched = self._match_expression_by_vector(emotion)
+        # 1. 表情决策（统一逻辑：最短保持 + 句子边界切换）
+        state.emotion = self._decide_emotion(emotion, is_speaking)
 
-        # 2. 强制切换逻辑
-        if (
-            self._force_switch_seconds > 0
-            and self.config.emotions
-            and len(self.config.emotions) > 1
-        ):
-            if matched == self._current_emotion:
-                self._current_emotion_frames += 1
-            else:
-                # 自然地切换了表情
-                self._current_emotion = matched
-                self._current_emotion_frames = 1
-                self._waiting_for_sentence_start = False
-
-            elapsed_seconds = self._current_emotion_frames / self.fps
-
-            if (
-                elapsed_seconds >= self._force_switch_seconds
-                and not self._waiting_for_sentence_start
-            ):
-                # 超过时限，开始等待句首切换点
-                self._waiting_for_sentence_start = True
-                print(
-                    f"[StateEngine] force_switch: emotion='{self._current_emotion}' "
-                    f"held for {elapsed_seconds:.1f}s (>={self._force_switch_seconds}s), "
-                    f"waiting for sentence boundary..."
-                )
-
-            if self._waiting_for_sentence_start:
-                # 检测句首：从不说话 → 说话的转变（silence → speech transition）
-                is_sentence_start = is_speaking and not self._prev_is_speaking
-                if is_sentence_start:
-                    # 强制切换到不同的表情
-                    forced = self._match_expression_by_vector(
-                        emotion, exclude_emotion=self._current_emotion
-                    )
-                    print(
-                        f"[StateEngine] force_switch: TRIGGERED at sentence start! "
-                        f"'{self._current_emotion}' -> '{forced}' "
-                        f"(held {elapsed_seconds:.1f}s)"
-                    )
-                    matched = forced
-                    self._current_emotion = forced
-                    self._current_emotion_frames = 1
-                    self._waiting_for_sentence_start = False
-                else:
-                    # 还没到句首，保持当前表情
-                    matched = self._current_emotion
-
-            self._prev_is_speaking = is_speaking
-        else:
-            # 不启用强制切换
-            self._current_emotion = matched
-            self._current_emotion_frames = 1
-
-        state.emotion = matched
-
-        # 3. 能量
+        # 2. 能量
         state.energy = emotion.energy
 
-        # 4. 嘴型（讲话时张嘴闭嘴切换，而非一直张嘴）
+        # 3. 嘴型（讲话时张嘴闭嘴切换，而非一直张嘴）
         if is_speaking:
             self._mouth_timer += dt
-            # ~5Hz 振荡模拟自然语速的音节节奏
-            freq = 5.0
+            freq = self._mouth_frequency
             phase = math.sin(2 * math.pi * freq * self._mouth_timer)
             # 正半周期张嘴，负半周期闭嘴，创造明显的开合节奏
             mouth_envelope = max(0.0, phase)
@@ -317,19 +330,19 @@ class StateEngine:
             state.mouth_open = 0.0
             self._mouth_timer = 0.0  # 不讲话时重置计时器
 
-        # 5. 眨眼
+        # 4. 眨眼
         state.blink_phase = self._update_blink(dt, state.energy)
 
-        # 6. 动作
+        # 5. 动作
         state.gesture = self._decide_gesture(state.energy)
 
-        # 7. 表情权重
+        # 6. 表情权重
         state.expression_weights = emotion.as_dict()
 
-        # 8. 历史平滑
-        state = self._smooth_state(state)
+        # 7. 更新前帧说话状态（用于句子边界检测）
+        self._prev_is_speaking = is_speaking
 
-        # 9. 更新表情使用历史（所有表情衰减，当前表情累加）
+        # 8. 更新表情使用历史（所有表情衰减，当前表情累加）
         for k in self._emotion_usage:
             self._emotion_usage[k] *= self._emotion_decay
         self._emotion_usage[state.emotion] = (
@@ -389,23 +402,5 @@ class StateEngine:
 
         return self._current_gesture
 
-    def _smooth_state(self, state: CharacterState) -> CharacterState:
-        """
-        历史窗口平滑，防止情绪标签频繁跳变。
-        数值参数由 Animation Engine 做插值，这里只做情绪标签稳定化。
-        """
-        self._history.append(state.clone())
-
-        # 保持窗口大小
-        if len(self._history) > self._history_window:
-            self._history = self._history[-self._history_window :]
-
-        # 情绪投票：窗口内出现最多的情绪标签胜出
-        emotion_counts: dict[str, int] = {}
-        for s in self._history:
-            emotion_counts[s.emotion] = emotion_counts.get(s.emotion, 0) + 1
-
-        dominant = max(emotion_counts, key=emotion_counts.get)
-        state.emotion = dominant
-
-        return state
+    # 注：原 _smooth_state 历史投票已移除。
+    # 表情稳定化由 _decide_emotion() 的「最短保持 + 句子边界」机制统一处理。

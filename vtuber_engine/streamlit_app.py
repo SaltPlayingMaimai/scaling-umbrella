@@ -251,6 +251,28 @@ def _sidebar_config():
     )
     st.session_state["gesture_min_hold"] = gesture_min_hold
 
+    emotion_min_hold = st.sidebar.slider(
+        "表情最短保持（秒）",
+        min_value=1.0,
+        max_value=30.0,
+        value=float(st.session_state.get("emotion_min_hold", 5.0)),
+        step=0.5,
+        format="%.1f",
+        help="每个表情至少保持多少秒才允许切换。防止表情频繁跳变。默认 5秒。",
+    )
+    st.session_state["emotion_min_hold"] = emotion_min_hold
+
+    mouth_frequency = st.sidebar.slider(
+        "嘴型频率 (Hz)",
+        min_value=0.5,
+        max_value=8.0,
+        value=float(st.session_state.get("mouth_frequency", 2.5)),
+        step=0.5,
+        format="%.1f",
+        help="讲话时嘴巴开合的频率。越低越自然，越高越快。默认 2.5Hz。",
+    )
+    st.session_state["mouth_frequency"] = mouth_frequency
+
     emotion_backend = st.sidebar.selectbox(
         "情绪识别后端",
         ["qwen", "rule", "openai"],
@@ -297,6 +319,8 @@ def _sidebar_config():
         segment_seconds,
         force_switch_seconds,
         gesture_min_hold,
+        emotion_min_hold,
+        mouth_frequency,
     )
 
 
@@ -933,6 +957,8 @@ def _tab_generate(
     segment_seconds: float,
     force_switch_seconds: float = 0.0,
     gesture_min_hold: float = 1.5,
+    emotion_min_hold: float = 5.0,
+    mouth_frequency: float = 2.5,
 ):
     """生成视频界面。"""
     config = st.session_state.config
@@ -983,6 +1009,8 @@ def _tab_generate(
             segment_seconds,
             force_switch_seconds,
             gesture_min_hold,
+            emotion_min_hold,
+            mouth_frequency,
         )
 
 
@@ -993,6 +1021,8 @@ def _run_pipeline(
     segment_seconds: float = 1.0,
     force_switch_seconds: float = 0.0,
     gesture_min_hold: float = 1.5,
+    emotion_min_hold: float = 5.0,
+    mouth_frequency: float = 2.5,
 ):
     """执行完整生成管线（已优化：并行渲染 + 硬件编码 + 精细进度）。"""
     config = st.session_state.config
@@ -1046,6 +1076,8 @@ def _run_pipeline(
             fps=fps,
             force_switch_seconds=force_switch_seconds,
             gesture_min_hold_seconds=gesture_min_hold,
+            emotion_min_hold_seconds=emotion_min_hold,
+            mouth_frequency=mouth_frequency,
         )
         states = state_engine.process(audio_features, emotion_vectors)
         timings["状态计算"] = _time.perf_counter() - t0
@@ -1399,6 +1431,8 @@ def main():
         segment_seconds,
         force_switch_seconds,
         gesture_min_hold,
+        emotion_min_hold,
+        mouth_frequency,
     ) = _sidebar_config()
     st.session_state.vision_backend = vision_backend
 
@@ -1426,6 +1460,8 @@ def main():
             segment_seconds,
             force_switch_seconds,
             gesture_min_hold,
+            emotion_min_hold,
+            mouth_frequency,
         )
 
     with tab4:
