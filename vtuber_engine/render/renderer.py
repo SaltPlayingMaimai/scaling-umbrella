@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional
+from typing import Dict, Generator, Optional
 
 from vtuber_engine.models.data_models import (
     AnimatedState,
@@ -164,6 +164,42 @@ class Renderer:
             progress_callback(total, total)
 
         return frames
+
+    def render_sequence_streaming(
+        self, states: list[AnimatedState], progress_callback=None
+    ) -> Generator:
+        """
+        流式渲染帧序列（生成器）。
+
+        与 render_sequence 不同，不会将所有帧存入内存列表，
+        老每次只 yield 一帧，由调用方（导出器）立即消费并释放。
+        内存占用降低为 O(唯一帧数) 而非 O(总帧数)。
+
+        Yields:
+            PIL Image 帧。
+        """
+        total = len(states)
+
+        # 预渲染唯一基础帧（缓存）
+        for state in states:
+            h = self._hash_state(state)
+            if h not in self._frame_cache:
+                self._frame_cache[h] = self._render_single(state)
+
+        # 逐帧 yield，调用方消费后即可 GC
+        for i, state in enumerate(states):
+            h = self._hash_state(state)
+            base = self._frame_cache[h]
+            bounce_px = int(round(getattr(state, "bounce_offset", 0.0)))
+            if bounce_px != 0:
+                yield self._apply_bounce(base, bounce_px)
+            else:
+                yield base
+            if progress_callback and i % 30 == 0:
+                progress_callback(i, total)
+
+        if progress_callback:
+            progress_callback(total, total)
 
     def _render_single(self, state: AnimatedState) -> Image.Image:
         """渲染单个独立帧（内部使用，不检查缓存）。"""

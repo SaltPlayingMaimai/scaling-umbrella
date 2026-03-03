@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 try:
     from PIL import Image
@@ -82,21 +82,25 @@ class VideoExporter:
 
     def export(
         self,
-        frames: list,
+        frames,
         audio_bytes: Optional[bytes] = None,
         audio_suffix: str = ".wav",
         output_filename: str = "output.mp4",
         progress_callback=None,
+        total_frames: Optional[int] = None,
+        resolution: Optional[Tuple[int, int]] = None,
     ) -> str:
         """
         导出视频。
 
         Args:
-            frames: PIL Image 列表（帧序列）。
+            frames: PIL Image 列表或生成器/迭代器（帧序列）。
             audio_bytes: 音频文件的内容（可选）。
             audio_suffix: 音频文件后缀（如 ".wav" ".mp3"）。
             output_filename: 输出文件名。
             progress_callback: 可选回调 fn(current_frame, total_frames)。
+            total_frames: 总帧数（生成器模式时必须提供）。
+            resolution: (width, height)，生成器模式时必须提供。
 
         Returns:
             输出视频的完整路径。
@@ -110,7 +114,13 @@ class VideoExporter:
         with tempfile.TemporaryDirectory(prefix="vtuber_frames_") as tmp_dir:
             # 通过 stdin pipe 直接管道到 ffmpeg
             video_only = os.path.join(tmp_dir, "video_only.mp4")
-            self._encode_video_pipe(frames, video_only, progress_callback)
+            self._encode_video_pipe(
+                frames,
+                video_only,
+                progress_callback,
+                total_frames=total_frames,
+                resolution=resolution,
+            )
 
             # 2. 合并音轨
             if audio_bytes:
@@ -204,22 +214,30 @@ class VideoExporter:
 
     def _encode_video_pipe(
         self,
-        frames: list,
+        frames,
         output_path: str,
         progress_callback=None,
+        total_frames: Optional[int] = None,
+        resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
         """
-        通过 stdin pipe 将帧列表直接管道给 ffmpeg。
+        通过 stdin pipe 将帧直接管道给 ffmpeg。
 
-        优化：
-          1. 自动选择硬件编码器（NVENC/QSV/AMF）或 libx264
-          2. 多线程并行将 PIL→RGB bytes
-          3. 缓冲批量写入 stdin（减少系统调用）
+        支持列表和生成器/迭代器输入。
+        生成器模式时逐帧处理，内存中同时只存在少量帧。
         """
-        if not frames:
-            raise ValueError("No frames to encode")
-
-        w, h = frames[0].size
+        # 确定分辨率和总帧数
+        if isinstance(frames, list):
+            if not frames:
+                raise ValueError("No frames to encode")
+            w, h = frames[0].size
+            total = len(frames)
+        else:
+            # 生成器模式
+            if resolution is None:
+                raise ValueError("resolution is required when frames is a generator")
+            w, h = resolution
+            total = total_frames or 0
 
         # 选择编码器
         hw = self._detect_hw_encoder()
@@ -260,29 +278,39 @@ class VideoExporter:
             stderr=subprocess.PIPE,
         )
 
-        total = len(frames)
         buf_size = self.pipe_buffer_frames
-        frame_byte_size = w * h * 3  # RGB24
+
+        def _flush(batch: list) -> None:
+            """将当前批次转为 bytes 并写入 ffmpeg stdin。"""
+            if not batch:
+                return
+            if len(batch) > 1 and self.max_workers > 1:
+                with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                    raw_chunks = list(pool.map(self._frame_to_rgb_bytes, batch))
+            else:
+                raw_chunks = [self._frame_to_rgb_bytes(f) for f in batch]
+            blob = b"".join(raw_chunks)
+            proc.stdin.write(blob)
+            batch.clear()
+            del raw_chunks, blob
 
         try:
-            # 分批处理：每批先并行转换，再批量写入
-            for batch_start in range(0, total, buf_size):
-                batch_end = min(batch_start + buf_size, total)
-                batch = frames[batch_start:batch_end]
+            # 流式处理：分批从迭代器中拉取帧，满 buf_size 就刷写
+            batch: list = []
+            frame_idx = 0
+            for frame in frames:
+                batch.append(frame)
+                frame_idx += 1
 
-                # 并行 PIL → bytes（IO 释放 GIL，Pillow tobytes 同理）
-                if len(batch) > 1 and self.max_workers > 1:
-                    with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-                        raw_chunks = list(pool.map(self._frame_to_rgb_bytes, batch))
-                else:
-                    raw_chunks = [self._frame_to_rgb_bytes(f) for f in batch]
+                if len(batch) >= buf_size:
+                    _flush(batch)
+                    if progress_callback:
+                        progress_callback(frame_idx, total)
 
-                # 合并为单次大写入（减少 syscall）
-                blob = b"".join(raw_chunks)
-                proc.stdin.write(blob)
-
-                if progress_callback:
-                    progress_callback(batch_end, total)
+            # 刷写末尾不足一批的残余帧
+            _flush(batch)
+            if progress_callback:
+                progress_callback(frame_idx, total)
 
             proc.stdin.close()
             _, stderr = proc.communicate(timeout=600)

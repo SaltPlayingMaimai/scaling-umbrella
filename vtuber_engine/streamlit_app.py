@@ -1065,46 +1065,42 @@ def _run_pipeline(
         animated_states = anim_engine.process(states)
         timings["动画平滑"] = _time.perf_counter() - t0
 
-        # Step 5: 渲染帧（利用优化后的 render_sequence：去重 + 并行）
-        progress.progress(50, text="🖼️ 渲染帧图像...")
+        # Step 5 + 6: 流式渲染 + 编码（渲染器逐帧 yield → 导出器边收边编码）
+        # 不再将全部帧存入内存列表，极大降低内存占用
+        progress.progress(50, text="🖼️🎬 流式渲染 & 编码...")
         t0 = _time.perf_counter()
         from vtuber_engine.render.renderer import Renderer
+        from vtuber_engine.export.video_exporter import VideoExporter
 
         renderer = Renderer(config, assets)
         total_frames = len(animated_states)
-
-        def _render_progress(current, total):
-            pct = 50 + int((current / max(total, 1)) * 25)
-            progress.progress(min(pct, 75), text=f"🖼️ 渲染帧 {current}/{total}...")
-
-        frames = renderer.render_sequence(
-            animated_states, progress_callback=_render_progress
-        )
-        timings["帧渲染"] = _time.perf_counter() - t0
-
-        # Step 6: 导出视频（硬件编码 + 缓冲写入）
-        progress.progress(78, text="🎬 导出视频...")
-        t0 = _time.perf_counter()
-        from vtuber_engine.export.video_exporter import VideoExporter
 
         output_dir = tempfile.mkdtemp(prefix="vtuber_output_")
         exporter = VideoExporter(fps=fps, output_dir=output_dir)
         encoder_info = exporter.get_encoder_info()
 
-        def _export_progress(current, total):
-            pct = 78 + int((current / max(total, 1)) * 18)
+        def _streaming_progress(current, total):
+            pct = 50 + int((current / max(total, 1)) * 45)
             progress.progress(
-                min(pct, 96), text=f"🎬 编码帧 {current}/{total} [{encoder_info}]..."
+                min(pct, 96),
+                text=f"🖼️🎬 渲染 & 编码帧 {current}/{total} [{encoder_info}]...",
             )
 
+        # 流式生成器：每次只产出一帧，导出器立即消费
+        frame_gen = renderer.render_sequence_streaming(
+            animated_states, progress_callback=_streaming_progress
+        )
+
         output_path = exporter.export(
-            frames=frames,
+            frames=frame_gen,
             audio_bytes=audio_bytes,
             audio_suffix=audio_suffix,
             output_filename="output.mp4",
-            progress_callback=_export_progress,
+            progress_callback=None,  # 进度已在生成器中回调
+            total_frames=total_frames,
+            resolution=config.resolution,
         )
-        timings["视频导出"] = _time.perf_counter() - t0
+        timings["渲染+编码"] = _time.perf_counter() - t0
 
         # 读取视频到内存
         with open(output_path, "rb") as f:
