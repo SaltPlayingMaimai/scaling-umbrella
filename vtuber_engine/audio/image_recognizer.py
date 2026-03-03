@@ -72,8 +72,10 @@ CLASSIFY_SYSTEM_PROMPT = (
 SINGLE_CLASSIFY_SYSTEM_PROMPT = (
     "You are a character sprite classifier for a VTuber/Live2D avatar system.\n"
     "The user provides a SINGLE character expression image.\n"
-    "Your task: classify this image into the best-matching slot, and provide a probability\n"
-    "for each of the four possible slots.\n\n"
+    "Your tasks:\n"
+    "1. Classify this image into the best-matching slot.\n"
+    "2. Estimate the probability for each of the four possible slots.\n"
+    "3. Identify the emotion expressed in this image.\n\n"
     "Slot definitions:\n"
     "   eo_mo = eyes open  + mouth open\n"
     "   eo_mc = eyes open  + mouth closed\n"
@@ -88,11 +90,16 @@ SINGLE_CLASSIFY_SYSTEM_PROMPT = (
     "Respond ONLY with valid JSON — no markdown fences, no comments, no extra text:\n"
     '{"assigned_slot": "<best_slot>", '
     '"probabilities": {"eo_mo": <0.0-1.0>, "eo_mc": <0.0-1.0>, '
-    '"ec_mo": <0.0-1.0>, "ec_mc": <0.0-1.0>}}\n\n'
-    "Rules:\n"
-    "- assigned_slot must be the slot with the highest probability.\n"
-    "- The four probabilities must sum to approximately 1.0.\n"
-    "- Be precise: a clearly open mouth must not have high probability in mc slots.\n"
+    '"ec_mo": <0.0-1.0>, "ec_mc": <0.0-1.0>}, '
+    '"emotion": "<single_word_lowercase>"}\n\n'
+    "Output rules:\n"
+    "- assigned_slot: the slot key with the highest probability.\n"
+    "- probabilities: must sum to ~1.0. A clearly open mouth must NOT have high\n"
+    "  probability in mc (mouth-closed) slots.\n"
+    "- emotion: a single lowercase English word for the facial expression\n"
+    "  (e.g. calm, happy, excited, sad, angry, panic, surprised, shy, smug, tired).\n"
+    "  For eyes-closed images, infer from mouth shape and overall expression.\n"
+    "  Do NOT use slot names (eo_mo, eo_mc, ec_mo, ec_mc) as emotion labels.\n"
 )
 
 IMAGE_LABELS = {
@@ -130,9 +137,11 @@ def _recognize_openai(
     model: str = "gpt-4o",
 ) -> str:
     """通过 OpenAI Vision API 识别情绪。"""
-    print(f"[ImageRecognizer][OpenAI] _recognize_openai called, model={model}, "
-          f"images_slots={[k for k,v in images.items() if v is not None]}, "
-          f"existing_emotions={existing_emotions}")
+    print(
+        f"[ImageRecognizer][OpenAI] _recognize_openai called, model={model}, "
+        f"images_slots={[k for k,v in images.items() if v is not None]}, "
+        f"existing_emotions={existing_emotions}"
+    )
     try:
         import openai
     except ImportError:
@@ -222,9 +231,11 @@ def _recognize_qwen(
     model: str = "qwen-vl-max",
 ) -> str:
     """通过通义千问 DashScope MultiModalConversation 识别情绪。"""
-    print(f"[ImageRecognizer][Qwen] _recognize_qwen called, model={model}, "
-          f"images_slots={[k for k,v in images.items() if v is not None]}, "
-          f"existing_emotions={existing_emotions}")
+    print(
+        f"[ImageRecognizer][Qwen] _recognize_qwen called, model={model}, "
+        f"images_slots={[k for k,v in images.items() if v is not None]}, "
+        f"existing_emotions={existing_emotions}"
+    )
     try:
         import dashscope
         from dashscope import MultiModalConversation
@@ -378,8 +389,10 @@ def _classify_openai(
     model: str = "gpt-4o",
 ) -> tuple:
     """通过 OpenAI Vision 自动分类每张图并识别情绪。"""
-    print(f"[ImageRecognizer][OpenAI] _classify_openai called, model={model}, "
-          f"n_images={len(images_list)}, existing_emotions={existing_emotions}")
+    print(
+        f"[ImageRecognizer][OpenAI] _classify_openai called, model={model}, "
+        f"n_images={len(images_list)}, existing_emotions={existing_emotions}"
+    )
     try:
         import openai
     except ImportError:
@@ -444,8 +457,10 @@ def _classify_openai(
         raise ValueError("OpenAI API 返回了空的 message 内容。请重试。")
     print(f"[ImageRecognizer][OpenAI][classify] raw_response={repr(raw)!r}")
     result = _parse_classify_response(raw, images_list)
-    print(f"[ImageRecognizer][OpenAI][classify] emotion='{result[0]}', "
-          f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}")
+    print(
+        f"[ImageRecognizer][OpenAI][classify] emotion='{result[0]}', "
+        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
+    )
     return result
 
 
@@ -455,8 +470,10 @@ def _classify_qwen(
     model: str = "qwen-vl-max",
 ) -> tuple:
     """通过通义千问 Qwen VL 自动分类每张图并识别情绪。"""
-    print(f"[ImageRecognizer][Qwen] _classify_qwen called, model={model}, "
-          f"n_images={len(images_list)}, existing_emotions={existing_emotions}")
+    print(
+        f"[ImageRecognizer][Qwen] _classify_qwen called, model={model}, "
+        f"n_images={len(images_list)}, existing_emotions={existing_emotions}"
+    )
     try:
         import dashscope
         from dashscope import MultiModalConversation
@@ -543,8 +560,10 @@ def _classify_qwen(
 
     print(f"[ImageRecognizer][Qwen][classify] raw_response={repr(raw)!r}")
     result = _parse_classify_response(raw, images_list)
-    print(f"[ImageRecognizer][Qwen][classify] emotion='{result[0]}', "
-          f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}")
+    print(
+        f"[ImageRecognizer][Qwen][classify] emotion='{result[0]}', "
+        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
+    )
     return result
 
 
@@ -558,7 +577,11 @@ def _parse_single_classify_response(raw_text: str) -> dict:
     解析单图分类的 AI JSON 响应。
 
     Returns:
-        {"assigned_slot": str, "probabilities": {slot: float}}
+        {
+            "assigned_slot": str,
+            "probabilities": {slot: float},
+            "emotion": str,
+        }
     """
     text = raw_text.strip()
     if text.startswith("```"):
@@ -582,7 +605,8 @@ def _parse_single_classify_response(raw_text: str) -> dict:
     probs = {k: round(v / total, 4) for k, v in probs.items()}
     if assigned not in IMAGE_LABELS:
         assigned = max(probs, key=probs.get)
-    return {"assigned_slot": assigned, "probabilities": probs}
+    emotion = _clean_label(data.get("emotion", "unknown"))
+    return {"assigned_slot": assigned, "probabilities": probs, "emotion": emotion}
 
 
 def _classify_single_openai(
@@ -591,12 +615,16 @@ def _classify_single_openai(
     model: str = "gpt-4o",
 ) -> dict:
     """通过 OpenAI Vision 对单张图片分类（返回 slot + 概率）。"""
-    print(f"[ImageRecognizer][OpenAI] _classify_single_openai called, model={model}, "
-          f"existing_slots={existing_slots}")
+    print(
+        f"[ImageRecognizer][OpenAI] _classify_single_openai called, model={model}, "
+        f"existing_slots={existing_slots}"
+    )
     try:
         import openai
     except ImportError:
-        raise ImportError("openai package is required. Install with: pip install openai")
+        raise ImportError(
+            "openai package is required. Install with: pip install openai"
+        )
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
@@ -619,8 +647,14 @@ def _classify_single_openai(
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Classify this sprite image.{existing_info}"},
-                    {"type": "image_url", "image_url": {"url": _pil_to_base64(image), "detail": "low"}},
+                    {
+                        "type": "text",
+                        "text": f"Classify this sprite image.{existing_info}",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _pil_to_base64(image), "detail": "low"},
+                    },
                 ],
             },
         ],
@@ -633,8 +667,10 @@ def _classify_single_openai(
     raw = response.choices[0].message.content or ""
     print(f"[ImageRecognizer][OpenAI][classify_single] raw_response={repr(raw)!r}")
     result = _parse_single_classify_response(raw)
-    print(f"[ImageRecognizer][OpenAI][classify_single] assigned_slot='{result['assigned_slot']}', "
-          f"probabilities={result['probabilities']}")
+    print(
+        f"[ImageRecognizer][OpenAI][classify_single] assigned_slot='{result['assigned_slot']}', "
+        f"probabilities={result['probabilities']}"
+    )
     return result
 
 
@@ -644,19 +680,25 @@ def _classify_single_qwen(
     model: str = "qwen-vl-max",
 ) -> dict:
     """通过 Qwen VL 对单张图片分类（返回 slot + 概率）。"""
-    print(f"[ImageRecognizer][Qwen] _classify_single_qwen called, model={model}, "
-          f"existing_slots={existing_slots}")
+    print(
+        f"[ImageRecognizer][Qwen] _classify_single_qwen called, model={model}, "
+        f"existing_slots={existing_slots}"
+    )
     try:
         import dashscope
         from dashscope import MultiModalConversation
     except ImportError:
-        raise ImportError("dashscope package is required. Install with: pip install dashscope")
+        raise ImportError(
+            "dashscope package is required. Install with: pip install dashscope"
+        )
 
     api_key = os.environ.get("DASHSCOPE_API_KEY", "")
     if not api_key:
         raise ValueError("DASHSCOPE_API_KEY 未设置。请在 .env 文件中配置。")
 
-    base_url = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1")
+    base_url = os.environ.get(
+        "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
+    )
     dashscope.base_http_api_url = base_url
 
     existing_info = ""
@@ -672,14 +714,24 @@ def _classify_single_qwen(
         {"role": "user", "content": user_content},
     ]
 
-    response = MultiModalConversation.call(api_key=api_key, model=model, messages=messages)
+    response = MultiModalConversation.call(
+        api_key=api_key, model=model, messages=messages
+    )
     if response is None:
         raise ValueError("Qwen API 返回了空响应。")
 
     output = getattr(response, "output", None)
     if output is None:
-        code = getattr(response, "code", "") if not hasattr(response, "get") else response.get("code", "")
-        msg = getattr(response, "message", "") if not hasattr(response, "get") else response.get("message", "")
+        code = (
+            getattr(response, "code", "")
+            if not hasattr(response, "get")
+            else response.get("code", "")
+        )
+        msg = (
+            getattr(response, "message", "")
+            if not hasattr(response, "get")
+            else response.get("message", "")
+        )
         raise ValueError(f"Qwen API 调用失败（code={code}）: {msg}")
 
     choices = getattr(output, "choices", None)
@@ -688,7 +740,11 @@ def _classify_single_qwen(
 
     content_data = choices[0].message.content
     if isinstance(content_data, list):
-        raw = content_data[0].get("text", "") if isinstance(content_data[0], dict) else str(content_data[0])
+        raw = (
+            content_data[0].get("text", "")
+            if isinstance(content_data[0], dict)
+            else str(content_data[0])
+        )
     else:
         raw = str(content_data) if content_data else ""
 
@@ -697,8 +753,10 @@ def _classify_single_qwen(
 
     print(f"[ImageRecognizer][Qwen][classify_single] raw_response={repr(raw)!r}")
     result = _parse_single_classify_response(raw)
-    print(f"[ImageRecognizer][Qwen][classify_single] assigned_slot='{result['assigned_slot']}', "
-          f"probabilities={result['probabilities']}")
+    print(
+        f"[ImageRecognizer][Qwen][classify_single] assigned_slot='{result['assigned_slot']}', "
+        f"probabilities={result['probabilities']}"
+    )
     return result
 
 
@@ -792,11 +850,58 @@ class ImageEmotionRecognizer:
                 }
             }
         """
-        print(f"[ImageRecognizer] classify_single called, backend={self.backend}, "
-              f"model={self.model}, existing_slots={existing_slots}")
+        print(
+            f"[ImageRecognizer] classify_single called, backend={self.backend}, "
+            f"model={self.model}, existing_slots={existing_slots}"
+        )
         if self.backend == "openai":
             return _classify_single_openai(image, existing_slots, self.model)
         elif self.backend == "qwen":
             return _classify_single_qwen(image, existing_slots, self.model)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
+
+    def classify_batch_parallel(
+        self,
+        images: List[Any],
+    ) -> List[Optional[dict]]:
+        """并行对最多 4 张图片分类，每张独立调用 AI。
+
+        Args:
+            images: 列表，元素为 PIL Image 或 None（None 的位置不调用）。
+
+        Returns:
+            与输入等长的列表，元素为分类结果字典或 None。
+            每个结果： {"assigned_slot": ..., "probabilities": {...}, "emotion": ...}
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print(
+            f"[ImageRecognizer] classify_batch_parallel called, backend={self.backend}, "
+            f"model={self.model}, n_images={sum(1 for x in images if x is not None)}"
+        )
+
+        results: List[Optional[dict]] = [None] * len(images)
+        tasks = [(i, img) for i, img in enumerate(images) if img is not None]
+
+        def _classify_one(idx: int, img: Any):
+            return idx, self.classify_single(image=img, existing_slots=None)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(_classify_one, i, img): i for i, img in tasks}
+            for future in as_completed(futures):
+                try:
+                    idx, res = future.result()
+                    results[idx] = res
+                    print(
+                        f"[ImageRecognizer] batch parallel: img#{idx+1} done -> "
+                        f"slot='{res['assigned_slot']}' emotion='{res['emotion']}'"
+                    )
+                except Exception as exc:
+                    img_idx = futures[future]
+                    print(
+                        f"[ImageRecognizer] batch parallel: img#{img_idx+1} FAILED: {exc}"
+                    )
+                    results[img_idx] = None
+
+        return results
