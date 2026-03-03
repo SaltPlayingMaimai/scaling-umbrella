@@ -180,6 +180,33 @@ def _sidebar_config():
         step=0.05,
     )
 
+    st.sidebar.subheader("🐰 讲话跳动效果")
+    bounce_enabled = st.sidebar.checkbox(
+        "启用跳动效果",
+        value=st.session_state.config.bounce_enabled,
+        help="讲话时角色会有弹性跳动的效果，让角色更灵动",
+    )
+    if bounce_enabled:
+        bounce_frequency = st.sidebar.slider(
+            "跳动频率 (Hz)",
+            0.5,
+            10.0,
+            value=st.session_state.config.bounce_frequency,
+            step=0.5,
+            help="每秒跳动次数，越高跳动越快",
+        )
+        bounce_amplitude = st.sidebar.slider(
+            "跳动幅度（像素）",
+            1.0,
+            50.0,
+            value=st.session_state.config.bounce_amplitude,
+            step=1.0,
+            help="跳动的最大高度（像素）",
+        )
+    else:
+        bounce_frequency = st.session_state.config.bounce_frequency
+        bounce_amplitude = st.session_state.config.bounce_amplitude
+
     fps = st.sidebar.selectbox("视频帧率", [24, 30, 60], index=1)
     smoothing = st.sidebar.slider(
         "动画平滑度",
@@ -258,6 +285,9 @@ def _sidebar_config():
     cfg.mouth_threshold = mouth_threshold
     cfg.blink_interval = blink_interval
     cfg.blink_duration = blink_duration
+    cfg.bounce_enabled = bounce_enabled
+    cfg.bounce_frequency = bounce_frequency
+    cfg.bounce_amplitude = bounce_amplitude
 
     return (
         fps,
@@ -1025,7 +1055,13 @@ def _run_pipeline(
         t0 = _time.perf_counter()
         from vtuber_engine.core.animation_engine import AnimationEngine
 
-        anim_engine = AnimationEngine(smoothing=smoothing)
+        anim_engine = AnimationEngine(
+            smoothing=smoothing,
+            fps=fps,
+            bounce_enabled=config.bounce_enabled,
+            bounce_frequency=config.bounce_frequency,
+            bounce_amplitude=config.bounce_amplitude,
+        )
         animated_states = anim_engine.process(states)
         timings["动画平滑"] = _time.perf_counter() - t0
 

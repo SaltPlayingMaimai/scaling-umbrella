@@ -16,6 +16,7 @@ Animation Engine — 动画参数插值平滑层。
 
 from __future__ import annotations
 
+import math
 from typing import List
 
 from vtuber_engine.models.data_models import AnimatedState, CharacterState
@@ -24,16 +25,36 @@ from vtuber_engine.models.data_models import AnimatedState, CharacterState
 class AnimationEngine:
     """对角色状态参数做插值平滑。"""
 
-    def __init__(self, smoothing: float = 0.2):
+    def __init__(
+        self,
+        smoothing: float = 0.2,
+        fps: int = 30,
+        bounce_enabled: bool = True,
+        bounce_frequency: float = 3.0,
+        bounce_amplitude: float = 8.0,
+    ):
         """
         Args:
             smoothing: 插值速度 (0~1)。
                        0.1 = 非常平滑（慢响应）
                        0.5 = 较快响应
                        1.0 = 无平滑（直接跳变）
+            fps: 帧率，用于计算跳动时间。
+            bounce_enabled: 是否启用讲话跳动效果。
+            bounce_frequency: 跳动频率 (Hz)。
+            bounce_amplitude: 跳动幅度（像素）。
         """
         self.smoothing = smoothing
         self._current = AnimatedState()
+        self._fps = fps
+        self._dt = 1.0 / max(1, fps)
+
+        # 跳动参数
+        self._bounce_enabled = bounce_enabled
+        self._bounce_frequency = bounce_frequency
+        self._bounce_amplitude = bounce_amplitude
+        self._bounce_timer: float = 0.0
+        self._current_bounce: float = 0.0
 
     # ──────────────────── 公共接口 ────────────────────
 
@@ -93,6 +114,9 @@ class AnimationEngine:
         self._current.gesture = target.gesture
         self._current.expression_weights = dict(target.expression_weights)
 
+        # 讲话跳动
+        self._current.bounce_offset = self._compute_bounce(target.mouth_open)
+
         # 返回快照
         return AnimatedState(
             emotion=self._current.emotion,
@@ -101,6 +125,7 @@ class AnimationEngine:
             blink_phase=round(self._current.blink_phase, 4),
             gesture=self._current.gesture,
             expression_weights=dict(self._current.expression_weights),
+            bounce_offset=round(self._current.bounce_offset, 2),
         )
 
     def _mouth_smoothing(self, target: CharacterState) -> float:
@@ -118,3 +143,34 @@ class AnimationEngine:
     def _lerp(current: float, target: float, speed: float) -> float:
         """线性插值。"""
         return current + (target - current) * speed
+
+    # ──────────────────── 讲话跳动 ────────────────────
+
+    def _compute_bounce(self, mouth_open: float) -> float:
+        """
+        计算讲话时的弹性跳动偏移。
+
+        口型打开时（speaking）驱动跳动动画；
+        口型关闭时平滑衰减回 0。
+        """
+        if not self._bounce_enabled:
+            return 0.0
+
+        if mouth_open > 0.01:  # 正在讲话
+            self._bounce_timer += self._dt
+            t = self._bounce_timer * self._bounce_frequency
+            # 主跳动: abs(sin) 产生类似弹球的上下运动
+            base = abs(math.sin(math.pi * t))
+            # 弹性副振荡: 叠加高频微振让跳动感更有弹性
+            elastic = 1.0 + 0.15 * math.sin(2 * math.pi * t * 3)
+            bounce = max(0.0, base * elastic) * self._bounce_amplitude
+            self._current_bounce = bounce
+        else:
+            # 不讲话时平滑衰减
+            self._current_bounce *= 0.85
+            if abs(self._current_bounce) < 0.5:
+                self._current_bounce = 0.0
+                self._bounce_timer = 0.0
+            bounce = self._current_bounce
+
+        return bounce

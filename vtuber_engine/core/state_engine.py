@@ -75,6 +75,15 @@ class StateEngine:
         self._gesture_hold_frames: int = 0
         self._gesture_min_hold_frames: int = max(1, int(gesture_min_hold_seconds * fps))
 
+        # 嘴巴开合振荡定时器（讲话时张嘴闭嘴切换，而不是一直张嘴）
+        self._mouth_timer: float = 0.0
+
+        # 表情使用历史（用于降权，避免始终停留在同一表情）
+        self._emotion_usage: dict[str, float] = {}
+        self._emotion_decay: float = 0.995  # 每帧衰减系数
+        self._emotion_penalty_factor: float = 0.003  # 每单位使用量的惩罚系数
+        self._emotion_penalty_cap: float = 0.3  # 最大惩罚比例 (30%)
+
     # ──────────────────── 公共接口 ────────────────────
 
     def process(
@@ -175,8 +184,15 @@ class StateEngine:
             if emo not in self.config.emotions:
                 continue
             sim = cosine_similarity(audio_dict, emo_vec)
-            if sim > best_sim:
-                best_sim = sim
+            # 历史使用降权：最近频繁使用的表情得分降低
+            usage = self._emotion_usage.get(emo, 0.0)
+            penalty = min(
+                usage * self._emotion_penalty_factor,
+                self._emotion_penalty_cap,
+            )
+            adjusted_sim = sim * (1.0 - penalty)
+            if adjusted_sim > best_sim:
+                best_sim = adjusted_sim
                 best_emotion = emo
 
         if not best_emotion:
@@ -288,11 +304,18 @@ class StateEngine:
         # 3. 能量
         state.energy = emotion.energy
 
-        # 4. 嘴型（说话时按音量开合）
+        # 4. 嘴型（讲话时张嘴闭嘴切换，而非一直张嘴）
         if is_speaking:
-            state.mouth_open = min(1.0, volume * 1.5)
+            self._mouth_timer += dt
+            # ~5Hz 振荡模拟自然语速的音节节奏
+            freq = 5.0
+            phase = math.sin(2 * math.pi * freq * self._mouth_timer)
+            # 正半周期张嘴，负半周期闭嘴，创造明显的开合节奏
+            mouth_envelope = max(0.0, phase)
+            state.mouth_open = mouth_envelope * min(1.0, volume * 2.0)
         else:
             state.mouth_open = 0.0
+            self._mouth_timer = 0.0  # 不讲话时重置计时器
 
         # 5. 眨眼
         state.blink_phase = self._update_blink(dt, state.energy)
@@ -305,6 +328,13 @@ class StateEngine:
 
         # 8. 历史平滑
         state = self._smooth_state(state)
+
+        # 9. 更新表情使用历史（所有表情衰减，当前表情累加）
+        for k in self._emotion_usage:
+            self._emotion_usage[k] *= self._emotion_decay
+        self._emotion_usage[state.emotion] = (
+            self._emotion_usage.get(state.emotion, 0.0) + 1.0
+        )
 
         return state
 

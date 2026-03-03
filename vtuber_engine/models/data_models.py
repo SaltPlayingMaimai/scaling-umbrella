@@ -160,6 +160,7 @@ class AnimatedState:
     blink_phase: float = 0.0
     gesture: int = 0
     expression_weights: Dict[str, float] = field(default_factory=dict)
+    bounce_offset: float = 0.0  # 垂直跳动偏移（像素，正值=向上跳）
 
 
 # ─────────────────────────────────────────────
@@ -209,6 +210,11 @@ class CharacterConfig:
     mouth_threshold: float = 0.5  # mouth_open > threshold 则张嘴
     blink_interval: float = 3.0  # 眨眼间隔（秒）
     blink_duration: float = 0.15  # 单次眨眼时长（秒）
+
+    # 讲话跳动效果
+    bounce_enabled: bool = True  # 是否启用讲话跳动
+    bounce_frequency: float = 3.0  # 跳动频率 (Hz)
+    bounce_amplitude: float = 8.0  # 跳动幅度（像素）
 
     @staticmethod
     def image_key(emotion: str, eye_open: bool, mouth_open: bool) -> str:

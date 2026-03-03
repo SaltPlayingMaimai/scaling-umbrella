@@ -91,20 +91,23 @@ class Renderer:
         Returns:
             RGBA Image。
         """
-        # 检查帧缓存
+        # 检查帧缓存（基础帧，不含跳动偏移）
         state_hash = self._hash_state(state)
         if state_hash in self._frame_cache:
-            return self._frame_cache[state_hash]
+            base = self._frame_cache[state_hash]
+        else:
+            # 确定该帧使用哪张图
+            render_frame = self._resolve_image(state)
+            # 合成
+            base = self._compose(render_frame)
+            # 缓存
+            self._frame_cache[state_hash] = base
 
-        # 确定该帧使用哪张图
-        render_frame = self._resolve_image(state)
-
-        # 合成
-        canvas = self._compose(render_frame)
-
-        # 缓存
-        self._frame_cache[state_hash] = canvas
-        return canvas
+        # 应用跳动偏移
+        bounce_px = int(round(getattr(state, "bounce_offset", 0.0)))
+        if bounce_px != 0:
+            return self._apply_bounce(base, bounce_px)
+        return base
 
     def render_sequence(
         self, states: list[AnimatedState], progress_callback=None
@@ -145,10 +148,15 @@ class Renderer:
         for i, (h, state) in enumerate(hash_to_state.items()):
             self._frame_cache[h] = self._render_single(state)
 
-        # 第三步：按顺序组装
+        # 第三步：按顺序组装（并应用跳动偏移）
         frames = []
         for i, h in enumerate(hashes):
-            frames.append(self._frame_cache[h])
+            base = self._frame_cache[h]
+            bounce_px = int(round(getattr(states[i], "bounce_offset", 0.0)))
+            if bounce_px != 0:
+                frames.append(self._apply_bounce(base, bounce_px))
+            else:
+                frames.append(base)
             if progress_callback and i % 30 == 0:
                 progress_callback(i, total)
 
@@ -256,3 +264,29 @@ class Renderer:
     def clear_cache(self) -> None:
         """清空帧缓存。"""
         self._frame_cache.clear()
+
+    # ──────────────────── 跳动偏移 ────────────────────
+
+    def _apply_bounce(self, base_img: Image.Image, bounce_px: int) -> Image.Image:
+        """
+        在已渲染的基础帧上应用垂直跳动偏移。
+
+        bounce_px > 0 表示角色向上跳。
+        使用 PIL crop+paste 避免大 numpy 数组的频繁拷贝分配。
+        基础帧缓存不受影响，跳动作为轻量级后处理。
+        """
+        if bounce_px == 0:
+            return base_img
+
+        w, h = self.resolution
+        bounce_px = max(0, min(bounce_px, h - 1))
+
+        # 从 base_img 中裁出去掉底部 bounce_px 行的内容（即向上移动 bounce_px）
+        # crop box: (left, upper, right, lower)
+        cropped = base_img.crop((0, bounce_px, w, h))
+
+        # 新建一张绑幕大小的绿幕，将裁剪内容贴到顶部
+        # 底部剩余的 bounce_px 行自动保持绿色
+        canvas = Image.new("RGBA", (w, h), CHROMA_GREEN)
+        canvas.paste(cropped, (0, 0))
+        return canvas
