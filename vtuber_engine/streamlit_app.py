@@ -65,8 +65,11 @@ def _init_session():
         st.session_state.emotion_vectors = None
     if "video_bytes" not in st.session_state:
         st.session_state.video_bytes = None
-    if "audio_path" not in st.session_state:
-        st.session_state.audio_path = None
+    # 音频只存内存字节，不写入项目目录
+    if "audio_bytes" not in st.session_state:
+        st.session_state.audio_bytes = None
+    if "audio_suffix" not in st.session_state:
+        st.session_state.audio_suffix = ".wav"
 
 
 _init_session()
@@ -254,14 +257,11 @@ def _tab_audio():
             key="audio_upload",
         )
         if uploaded_audio is not None:
-            # 保存到临时文件
-            suffix = Path(uploaded_audio.name).suffix
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            tmp.write(uploaded_audio.read())
-            tmp.close()
-            st.session_state.audio_path = tmp.name
+            # 只存内存，不写入项目目录
+            st.session_state.audio_bytes = uploaded_audio.getvalue()
+            st.session_state.audio_suffix = Path(uploaded_audio.name).suffix
             st.audio(uploaded_audio)
-            st.success(f"✅ 音频已加载：{uploaded_audio.name}")
+            st.success(f"✅ 音频已加载：{uploaded_audio.name}（仅位于内存）")
 
     else:  # TTS
         tts_text = st.text_area(
@@ -284,14 +284,15 @@ def _tab_audio():
                 st.error("请输入文字内容。")
             else:
                 with st.spinner("正在生成语音..."):
-                    audio_path = _generate_tts(tts_text, tts_voice)
-                    st.session_state.audio_path = audio_path
-                    st.audio(audio_path)
-                    st.success("✅ 语音生成完成！")
+                    audio_bytes = _generate_tts(tts_text, tts_voice)
+                    st.session_state.audio_bytes = audio_bytes
+                    st.session_state.audio_suffix = ".mp3"
+                    st.audio(audio_bytes, format="audio/mp3")
+                    st.success("✅ 语音生成完成！（仅位于内存）")
 
 
-def _generate_tts(text: str, voice: str) -> str:
-    """使用 Edge TTS 生成语音。"""
+def _generate_tts(text: str, voice: str) -> bytes:
+    """使用 Edge TTS 生成语音，返回音频字节（不落盘）。"""
     import asyncio
 
     try:
@@ -300,15 +301,17 @@ def _generate_tts(text: str, voice: str) -> str:
         st.error("请先安装 edge-tts: `pip install edge-tts`")
         st.stop()
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    tmp.close()
+    buf = io.BytesIO()
 
     async def _gen():
         communicate = edge_tts.Communicate(text, voice=voice)
-        await communicate.save(tmp.name)
+        # stream() 返回 (type, data) 元组，收集 audio 类型的块
+        async for chunk_type, chunk_data in communicate.stream():
+            if chunk_type == "audio" and chunk_data:
+                buf.write(chunk_data)
 
     asyncio.run(_gen())
-    return tmp.name
+    return buf.getvalue()
 
 
 # ──────────────────────────────────────────────
@@ -332,8 +335,9 @@ def _tab_generate(fps: int, smoothing: float, emotion_backend: str):
     else:
         checks.append(f"✅ 所有素材已就绪")
 
-    if st.session_state.audio_path and os.path.exists(st.session_state.audio_path):
-        checks.append(f"✅ 音频已加载")
+    if st.session_state.audio_bytes:
+        size_kb = len(st.session_state.audio_bytes) / 1024
+        checks.append(f"✅ 音频已加载（{size_kb:.0f} KB，仅位于内存）")
     else:
         checks.append(f"❌ 请先上传音频或生成 TTS")
         ready = False
@@ -355,17 +359,18 @@ def _run_pipeline(fps: int, smoothing: float, emotion_backend: str):
     """执行完整生成管线。"""
     config = st.session_state.config
     assets = st.session_state.assets
-    audio_path = st.session_state.audio_path
+    audio_bytes: bytes = st.session_state.audio_bytes
+    audio_suffix: str = st.session_state.audio_suffix
 
     progress = st.progress(0, text="准备中...")
 
     try:
-        # Step 1: 音频分析
+        # Step 1: 音频分析（传入内存字节，不需要文件路径）
         progress.progress(5, text="🔍 分析音频特征...")
         from vtuber_engine.audio.analyzer import AudioAnalyzer
 
         analyzer = AudioAnalyzer(fps=fps)
-        audio_features = analyzer.analyze(audio_path)
+        audio_features = analyzer.analyze(audio_bytes)
         st.session_state.audio_features = audio_features
 
         # Step 2: 情绪分析
@@ -413,7 +418,8 @@ def _run_pipeline(fps: int, smoothing: float, emotion_backend: str):
         exporter = VideoExporter(fps=fps, output_dir=output_dir)
         output_path = exporter.export(
             frames=frames,
-            audio_path=audio_path,
+            audio_bytes=audio_bytes,
+            audio_suffix=audio_suffix,
             output_filename="output.mp4",
         )
 

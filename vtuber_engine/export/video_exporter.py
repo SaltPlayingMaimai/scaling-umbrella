@@ -50,7 +50,8 @@ class VideoExporter:
     def export(
         self,
         frames: list,
-        audio_path: Optional[str] = None,
+        audio_bytes: Optional[bytes] = None,
+        audio_suffix: str = ".wav",
         output_filename: str = "output.mp4",
     ) -> str:
         """
@@ -58,7 +59,8 @@ class VideoExporter:
 
         Args:
             frames: PIL Image 列表（帧序列）。
-            audio_path: 音频文件路径（可选，用于合并音轨）。
+            audio_bytes: 音频文件的内容（可选）。尺对内存，处理时临时落盘到系统临时目录再删除。
+            audio_suffix: 音频文件后缀（如 ".wav" ".mp3"）。
             output_filename: 输出文件名。
 
         Returns:
@@ -78,9 +80,19 @@ class VideoExporter:
             video_only = os.path.join(tmp_dir, "video_only.mp4")
             self._encode_video(tmp_dir, video_only)
 
-            # 3. 合并音轨
-            if audio_path and os.path.exists(audio_path):
-                self._merge_audio(video_only, audio_path, output_path)
+            # 3. 合并音轨（音频字节临时落盘，合并完就删除）
+            if audio_bytes:
+                fd, tmp_audio = tempfile.mkstemp(
+                    suffix=audio_suffix, prefix="vtuber_audio_"
+                )
+                try:
+                    os.close(fd)
+                    with open(tmp_audio, "wb") as af:
+                        af.write(audio_bytes)
+                    self._merge_audio(video_only, tmp_audio, output_path)
+                finally:
+                    if os.path.exists(tmp_audio):
+                        os.remove(tmp_audio)
             else:
                 shutil.copy2(video_only, output_path)
 

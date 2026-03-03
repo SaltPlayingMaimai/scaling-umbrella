@@ -14,6 +14,11 @@ Audio Analyzer — 音频特征提取模块。
 
 from __future__ import annotations
 
+import io
+import os
+import tempfile
+from typing import Union
+
 import numpy as np
 
 from vtuber_engine.models.data_models import AudioFeatures
@@ -43,17 +48,40 @@ class AudioAnalyzer:
 
     # ──────────────────── 公共接口 ────────────────────
 
-    def analyze(self, audio_path: str) -> AudioFeatures:
+    def analyze(self, audio_source: Union[str, bytes, io.BytesIO]) -> AudioFeatures:
         """
-        分析音频文件，返回逐帧特征。
+        分析音频，返回逐帧特征。
 
         Args:
-            audio_path: 音频文件路径。
+            audio_source: 音频文件路径 或 bytes 或 BytesIO。
+                          传入内存数据时会在系统临时目录短暂落盘，用完即删。
 
         Returns:
             AudioFeatures 数据结构。
         """
-        y, sr = librosa.load(audio_path, sr=self.sample_rate)
+        tmp_path = None
+        try:
+            if isinstance(audio_source, str):
+                load_path = audio_source
+            else:
+                # bytes 或 BytesIO —— 写入系统临时目录，用完就删
+                data = (
+                    audio_source
+                    if isinstance(audio_source, bytes)
+                    else audio_source.read()
+                )
+                suffix = ".wav"
+                fd, tmp_path = tempfile.mkstemp(suffix=suffix, prefix="vtuber_audio_")
+                os.close(fd)
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+                load_path = tmp_path
+
+            y, sr = librosa.load(load_path, sr=self.sample_rate)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
         duration = librosa.get_duration(y=y, sr=sr)
 
         hop_length = sr // self.fps  # 每帧对应的采样点数
