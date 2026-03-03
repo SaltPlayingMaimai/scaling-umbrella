@@ -1,0 +1,17 @@
+character:
+  name: "my_oc"
+  resolution: [1080, 1920]
+
+  # 支持的表情状态列表
+  # 每个状态需要上传 4 张图（眼开嘴开、眼开嘴闭、眼闭嘴开、眼闭嘴闭）
+  emotions:
+    - calm
+    - excited
+    - panic
+
+  # 嘴型阈值：mouth_open > threshold 则选择张嘴图片
+  mouth_threshold: 0.5
+
+  # 眨眼参数
+  blink_interval: 3.0    # 眨眼间隔（秒）
+  blink_duration: 0.15   # 单次眨眼时长（秒）
