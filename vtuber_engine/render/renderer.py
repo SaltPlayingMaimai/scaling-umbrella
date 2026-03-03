@@ -250,9 +250,15 @@ class Renderer:
             canvas_np = self._green_bg_np.copy()
             char_np = np.asarray(char_img)
 
-            # 居中放置
+            # 居中放置；若启用跳动，将角色向下偏移 bounce_amplitude 像素，
+            # 为向上弹跳预留顶部余量，避免跳动时裁切角色顶部像素。
+            bounce_headroom = (
+                int(self.config.bounce_amplitude)
+                if getattr(self.config, "bounce_enabled", False)
+                else 0
+            )
             x = (w - char_img.width) // 2
-            y = (h - char_img.height) // 2
+            y = (h - char_img.height) // 2 + bounce_headroom
 
             # 裁剪（防止超出画布）
             src_x1 = max(0, -x)
@@ -283,8 +289,13 @@ class Renderer:
 
         # PIL 回退路径
         canvas = self._green_bg_pil.copy()
+        bounce_headroom = (
+            int(self.config.bounce_amplitude)
+            if getattr(self.config, "bounce_enabled", False)
+            else 0
+        )
         x = (w - char_img.width) // 2
-        y = (h - char_img.height) // 2
+        y = (h - char_img.height) // 2 + bounce_headroom
         canvas.paste(char_img, (x, y), mask=char_img)
         return canvas
 
