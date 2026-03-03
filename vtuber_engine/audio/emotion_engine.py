@@ -435,8 +435,16 @@ class EmotionEngine:
                 raise ValueError("Qwen API 返回了空响应。请检查 API Key 和网络连接。")
             if not hasattr(response, "output") or response.output is None:
                 # 提取实际错误信息
-                err_code = getattr(response, "code", getattr(response, "status_code", "unknown"))
-                err_msg = getattr(response, "message", getattr(response, "error", str(response)))
+                err_code = getattr(
+                    response, "code", getattr(response, "status_code", "unknown")
+                )
+                try:
+                    err_msg = response.message
+                except Exception:
+                    try:
+                        err_msg = response.error  # type: ignore[attr-defined]
+                    except Exception:
+                        err_msg = str(response)
                 raise ValueError(f"Qwen API 调用失败（code={err_code}\uff09: {err_msg}")
             if not response.output.choices or response.output.choices[0] is None:
                 raise ValueError("Qwen API 返回了无效的 choices。请重试。")

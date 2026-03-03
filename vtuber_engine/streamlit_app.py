@@ -21,6 +21,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import streamlit as st
 from PIL import Image
 from dotenv import load_dotenv
@@ -76,15 +80,17 @@ def _init_session():
         st.session_state.audio_suffix = ".wav"
     # 情绪分析分段时长（秒）
     if "segment_seconds" not in st.session_state:
-        st.session_state.segment_seconds = 1.0
+        st.session_state.segment_seconds = 12.5
     # 强制切换表情秒数（0 = 不启用）
     if "force_switch_seconds" not in st.session_state:
-        st.session_state.force_switch_seconds = 0.0
+        st.session_state.force_switch_seconds = 12.0
     # 批量上传模式（主流程）：4 张图同时上传、并行 AI 识别
     if "pending_batch_images" not in st.session_state:
         st.session_state.pending_batch_images = [None, None, None, None]
     if "pending_batch_file_ids" not in st.session_state:
         st.session_state.pending_batch_file_ids = [None, None, None, None]
+    if "pending_batch_filenames" not in st.session_state:
+        st.session_state.pending_batch_filenames = [None, None, None, None]
     if "pending_batch_results" not in st.session_state:
         st.session_state.pending_batch_results = [None, None, None, None]
     # pending_img_slots[i] = 分配给第 i 张图的 slot 名称，或 None
@@ -96,12 +102,15 @@ def _init_session():
     # upload_round 保持向下兼容
     if "upload_round" not in st.session_state:
         st.session_state.upload_round = 0
+    # 最近一次自动注册的表情名（用于显示成功消息）
+    if "_last_registered_emotion" not in st.session_state:
+        st.session_state["_last_registered_emotion"] = None
     # 调试数据：emotion -> [ai_result_for_slot0..3]（按 eo_mo/eo_mc/ec_mo/ec_mc 顺序）
     if "emotion_debug_data" not in st.session_state:
         st.session_state.emotion_debug_data = {}
     # AI 模型选择
     if "text_model" not in st.session_state:
-        st.session_state.text_model = "qwen3.5-flash"  # 情緒分析文字模型
+        st.session_state.text_model = "qwen-plus"  # 情绪分析文字模型
     if "vision_model" not in st.session_state:
         st.session_state.vision_model = (
             "qwen-vl-max"  # 图片识别视觉模型（视觉理解模型）
@@ -204,6 +213,17 @@ def _sidebar_config():
     )
     st.session_state.force_switch_seconds = force_switch_seconds
 
+    gesture_min_hold = st.sidebar.slider(
+        "动作最小停留（秒）",
+        min_value=0.1,
+        max_value=10.0,
+        value=float(st.session_state.get("gesture_min_hold", 5.0)),
+        step=0.1,
+        format="%.1f",
+        help="动作切换后至少停留多少秒再允许切换下一个。防止动作快速跳变。默认 5秒。",
+    )
+    st.session_state["gesture_min_hold"] = gesture_min_hold
+
     emotion_backend = st.sidebar.selectbox(
         "情绪识别后端",
         ["qwen", "rule", "openai"],
@@ -220,7 +240,7 @@ def _sidebar_config():
     )
 
     # 后端切换时自动重置为该后端的默认模型
-    _TEXT_DEFAULTS = {"qwen": "qwen3.5-flash", "openai": "gpt-4o-mini", "rule": ""}
+    _TEXT_DEFAULTS = {"qwen": "qwen-plus", "openai": "gpt-4o-mini", "rule": ""}
     _VISION_DEFAULTS = {"qwen": "qwen-vl-max", "openai": "gpt-4o"}
     prev_text_backend = st.session_state.get("_prev_text_backend", emotion_backend)
     prev_vision_backend = st.session_state.get("_prev_vision_backend", vision_backend)
@@ -246,6 +266,7 @@ def _sidebar_config():
         vision_backend,
         segment_seconds,
         force_switch_seconds,
+        gesture_min_hold,
     )
 
 
@@ -344,6 +365,53 @@ def _tab_upload_assets():
                     else:
                         st.caption("_(该表情组无 AI 识别数据)_")
 
+                # ── 编辑区：改名 + 槽位调整
+                with st.expander("✏️ 编辑表情组", expanded=False):
+                    # 改名
+                    st.caption("**重命名**")
+                    rcol1, rcol2 = st.columns([3, 1])
+                    with rcol1:
+                        new_name_input = st.text_input(
+                            "新名称",
+                            value=emotion,
+                            key=f"rename_input_{emotion}",
+                            label_visibility="collapsed",
+                        )
+                    with rcol2:
+                        if st.button("保存", key=f"save_rename_{emotion}"):
+                            _rename_emotion(emotion, new_name_input.strip().lower())
+                            st.rerun()
+
+                    st.divider()
+                    # 槽位调整（同组图片之间互换）
+                    st.caption("**调整槽位分配**（同组图片之间互换）")
+                    current_slot_imgs = {
+                        slot: assets.get(f"{emotion}_{slot}")
+                        for slot in _SLOT_ORDER
+                        if assets.has(f"{emotion}_{slot}")
+                    }
+                    if current_slot_imgs:
+                        img_list = list(current_slot_imgs.items())
+                        ecols = st.columns(len(img_list))
+                        new_slot_map: dict = {}
+                        avail_slots = list(current_slot_imgs.keys())
+                        for (orig_s, simg), ecol in zip(img_list, ecols):
+                            with ecol:
+                                st.image(simg, width=100, caption=_SLOT_CN[orig_s])
+                                new_s = st.selectbox(
+                                    "→ 槽位",
+                                    avail_slots,
+                                    index=avail_slots.index(orig_s),
+                                    key=f"edit_slot_{emotion}_{orig_s}",
+                                    format_func=lambda s: _SLOT_CN.get(s, s),
+                                )
+                                new_slot_map[orig_s] = new_s
+                        if st.button("应用槽位调整", key=f"apply_slots_{emotion}"):
+                            _reassign_slots(emotion, current_slot_imgs, new_slot_map)
+                            st.rerun()
+                    else:
+                        st.caption("_(该表情组暂无图片)_")
+
                 # 操作按钮行
                 btn_cols = st.columns([1, 1, 2])
                 with btn_cols[0]:
@@ -366,33 +434,61 @@ def _tab_upload_assets():
     st.subheader("➕ 添加新表情组")
     st.markdown("**📤 步骤 1 — 上传差分图（1-4 张）**")
 
+    # ── 显示最近一次自动注册的提示
+    if st.session_state.get("_last_registered_emotion"):
+        st.success(
+            f"✅ 已自动注册表情组「{st.session_state['_last_registered_emotion']}」！"
+        )
+        st.session_state["_last_registered_emotion"] = None
+
     batch_round = st.session_state.batch_upload_round
-    upload_cols = st.columns(4)
+
+    # 单个多文件上传器，一次最多选 4 张，减少渲染次数
+    uploaded_files = st.file_uploader(
+        "选择 1-4 张差分图（可一次性选择多张）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=f"batch_multi_{batch_round}",
+    )
+
+    # 检测是否有新文件上传
+    if uploaded_files:
+        uploaded_files = uploaded_files[:4]  # 截断至4张
+        new_ids = [f.file_id for f in uploaded_files]
+        old_ids = [
+            st.session_state.pending_batch_file_ids[i]
+            for i in range(len(uploaded_files))
+        ]
+        if new_ids != old_ids[: len(new_ids)]:
+            # 有新文件，重置 pending 状态
+            st.session_state.pending_batch_images = [None, None, None, None]
+            st.session_state.pending_batch_file_ids = [None, None, None, None]
+            st.session_state.pending_batch_results = [None, None, None, None]
+            st.session_state.pending_img_slots = [None, None, None, None]
+            for idx, f in enumerate(uploaded_files):
+                st.session_state.pending_batch_images[idx] = Image.open(f).convert(
+                    "RGBA"
+                )
+                st.session_state.pending_batch_file_ids[idx] = f.file_id
+                st.session_state.pending_batch_filenames[idx] = f.name
+
+    # 4 列一页布局：显示预览、文件名、删除按钮
+    st.markdown("**📄 已上传的文件**（点击「✕ 删除」移除）")
+    preview_cols = st.columns(4)
     for idx in range(4):
-        with upload_cols[idx]:
-            f = st.file_uploader(
-                f"图片 {idx + 1}",
-                type=["png", "jpg", "jpeg", "webp"],
-                key=f"batch_{idx}_{batch_round}",
-            )
-            if f is not None:
-                if st.session_state.pending_batch_file_ids[idx] != f.file_id:
-                    st.session_state.pending_batch_images[idx] = Image.open(f).convert(
-                        "RGBA"
-                    )
-                    st.session_state.pending_batch_file_ids[idx] = f.file_id
+        with preview_cols[idx]:
+            img = st.session_state.pending_batch_images[idx]
+            filename = st.session_state.pending_batch_filenames[idx]
+            if img is not None and filename is not None:
+                st.image(img, width=120)
+                st.caption(f"📄 {filename[:20]}")  # 截断长文件名
+                if st.button(f"✕ 删除", key=f"del_img_{idx}", use_container_width=True):
+                    st.session_state.pending_batch_images[idx] = None
+                    st.session_state.pending_batch_file_ids[idx] = None
+                    st.session_state.pending_batch_filenames[idx] = None
                     st.session_state.pending_batch_results[idx] = None
                     st.session_state.pending_img_slots[idx] = None
-            img = st.session_state.pending_batch_images[idx]
-            if img is not None:
-                # 显示小预览（文件上传器下方）
-                result = st.session_state.pending_batch_results[idx]
-                caption = f"图片 {idx + 1}"
-                if result:
-                    caption += (
-                        f"\n{result.get('label', '?')} / {result['assigned_slot']}"
-                    )
-                st.image(img, width=120, caption=caption)
+                    st.rerun()
             else:
                 st.caption("⬜ 未上传")
 
@@ -402,214 +498,19 @@ def _tab_upload_assets():
     if uploaded_count == 0:
         st.info("请至少上传 1 张图片。")
         return
-    st.caption(f"已上传 {uploaded_count} 张图片。")
 
-    # ─────────────────────────────────────────
-    # 步骤 2：AI 并行识别
-    # ─────────────────────────────────────────
-    st.divider()
-    st.markdown("**🤖 步骤 2 — AI 并行识别全部图片**")
-
-    all_done = all(
-        st.session_state.pending_batch_results[i] is not None
-        for i in range(4)
-        if st.session_state.pending_batch_images[i] is not None
+    # AI 识别并自动注册
+    st.markdown("**🤖 AI 识别并自动注册**")
+    st.caption(
+        "AI 自动识别每张图的眼/嘴状态后立即注册。"
+        "重名时自动追加后缀（如 `happy_2`）。"
+        "注册后可在上方「已注册的表情组」中修改名称或调整槽位。"
     )
 
-    ai_col, status_col = st.columns([3, 1])
-    with ai_col:
-        run_btn = st.button(
-            "🤖 AI 并行识别全部",
-            type="primary",
-            use_container_width=True,
-        )
-    with status_col:
-        if all_done:
-            st.success("✅ 完成")
-
-    if run_btn:
+    if st.button("🤖 AI 识别并自动注册", type="primary", use_container_width=True):
         _batch_classify_all(batch_round)
+        _auto_register_from_pending()
         st.rerun()
-
-    if not all_done:
-        st.info("点击「AI 并行识别全部」后可查看每张图的分类概率并调整分配。")
-        return
-
-    # ─────────────────────────────────────────
-    # 步骤 3：逐图显示结果 + 可调整分配
-    # ─────────────────────────────────────────
-    st.divider()
-    st.markdown("**📊 步骤 3 — 查看 AI 结果 & 调整分配**")
-    st.caption("绿色高亮 = AI 最高概率槽位。下拉框可覆盖 AI 建议。")
-
-    slot_key_options = [None] + _SLOT_ORDER
-    slot_display_options = ["(不分配)"] + [f"{_SLOT_CN[s]}  ({s})" for s in _SLOT_ORDER]
-
-    for idx in range(4):
-        img = st.session_state.pending_batch_images[idx]
-        if img is None:
-            continue
-
-        result = st.session_state.pending_batch_results[idx]
-        current_slot = st.session_state.pending_img_slots[idx]
-
-        with st.container(border=True):
-            left, mid, right = st.columns([1, 2, 2])
-
-            with left:
-                st.image(img, width=110, caption=f"图片 {idx + 1}")
-
-            with mid:
-                if result:
-                    probs = result["probabilities"]
-                    ai_slot = result["assigned_slot"]
-                    ai_label = result.get("label", "?")
-                    st.caption(f"**AI 建议槽:** `{ai_slot}`")
-                    st.caption(f"**AI 标签:** `{ai_label}`")
-                    eyebrow_s = result.get("eyebrow_analysis", "")
-                    eye_s = result.get("eye_analysis", "")
-                    mouth_s = result.get("mouth_analysis", "")
-                    if eyebrow_s:
-                        st.caption(f"🤨 {eyebrow_s[:80]}")
-                    if eye_s:
-                        st.caption(f"👁️ {eye_s[:80]}")
-                    if mouth_s:
-                        st.caption(f"👄 {mouth_s[:80]}")
-                    ev_s = result.get("emotion_vector", {})
-                    if ev_s:
-                        ev_display = " ".join(
-                            f"{k}:{v*100:.0f}%" for k, v in ev_s.items() if v > 0.01
-                        )
-                        st.caption(f"📊 {ev_display}")
-                    st.caption("---")
-                    for s in _SLOT_ORDER:
-                        p = probs.get(s, 0.0)
-                        is_top = s == ai_slot
-                        label = (
-                            f"{'🟩' if is_top else '　'} `{_SLOT_CN[s]}` {p*100:.1f}%"
-                        )
-                        st.caption(label)
-                        st.progress(p)
-                else:
-                    st.caption("_(无识别结果)_")
-
-            with right:
-                # 计算 selectbox 当前默认值
-                if current_slot in slot_key_options:
-                    default_idx = slot_key_options.index(current_slot)
-                else:
-                    default_idx = 0
-
-                chosen_display = st.selectbox(
-                    f"图片 {idx + 1} 分配到",
-                    slot_display_options,
-                    index=default_idx,
-                    key=f"slot_select_{idx}_{batch_round}",
-                )
-                # 同步回 session state（Streamlit 每次重渲染都会覆盖）
-                chosen_key = slot_key_options[
-                    slot_display_options.index(chosen_display)
-                ]
-                if chosen_key != st.session_state.pending_img_slots[idx]:
-                    st.session_state.pending_img_slots[idx] = chosen_key
-
-    # ─────────────────────────────────────────
-    # 步骤 4：最终槽位预览（冲突检测）
-    # ─────────────────────────────────────────
-    st.divider()
-    st.markdown("**🎯 步骤 4 — 最终槽位预览**")
-
-    # 从 selectbox session state 读取最新分配（注意：Streamlit widget 会在渲染时更新 session_state key）
-    final_slot_map: dict = {}  # slot -> (img_idx, img)
-    conflict_slots: set[str] = set()
-    for idx in range(4):
-        img = st.session_state.pending_batch_images[idx]
-        if img is None:
-            continue
-        slot = st.session_state.pending_img_slots[idx]
-        if slot is None:
-            continue
-        if slot in final_slot_map:
-            conflict_slots.add(slot)
-            # 冲突时保留最后一个（用最新 idx 覆盖）
-        final_slot_map[slot] = (idx, img)
-
-    if conflict_slots:
-        for cs in conflict_slots:
-            st.warning(
-                f"⚠️ 槽位「{_SLOT_CN[cs]}」有多张图片，已保留最后一张。请在步骤3中调整。"
-            )
-
-    prev_cols = st.columns(4)
-    for col, slot in zip(prev_cols, _SLOT_ORDER):
-        with col:
-            if slot in final_slot_map:
-                img_idx, img = final_slot_map[slot]
-                st.image(
-                    img, width=120, caption=f"✅ {_SLOT_CN[slot]}\n(图片{img_idx + 1})"
-                )
-            else:
-                st.caption(f"⬜ {_SLOT_CN[slot]}")
-                st.caption("_(未分配)_")
-
-    if not final_slot_map:
-        st.warning("请至少在步骤3中分配一个槽位。")
-        return
-
-    # ─────────────────────────────────────────
-    # 自动推断情绪名：优先级 eo_mo > eo_mc > ec_mo > ec_mc
-    # ─────────────────────────────────────────
-    suggested_emotion = "unknown"
-    suggested_ev = {}
-    for priority_slot in _SLOT_ORDER:
-        if priority_slot in final_slot_map:
-            img_idx, _ = final_slot_map[priority_slot]
-            r = st.session_state.pending_batch_results[img_idx]
-            if r:
-                # 使用 label（向量驱动，无文字情绪标签）
-                suggested_emotion = r.get("label") or "unknown"
-                suggested_ev = r.get("emotion_vector", {})
-            break
-
-    # ─────────────────────────────────────────
-    # 步骤 5：情绪名 + 确认
-    # ─────────────────────────────────────────
-    st.divider()
-    st.markdown("**📄 步骤 5 — 命名并确认**")
-    st.caption(f"AI 建议情绪名（来自优先级最高的已分配槽位）：`{suggested_emotion}`")
-    if suggested_ev:
-        ev_str = " | ".join(
-            f"{k}:{v*100:.0f}%" for k, v in suggested_ev.items() if v > 0.01
-        )
-        st.info(f"🎯 情绪向量: {ev_str}")
-
-    manual_label = st.text_input(
-        "情绪名称（可修改）",
-        value=suggested_emotion,
-        placeholder="例如：happy、calm、angry...",
-        key="manual_emotion_label",
-    )
-
-    confirm_btn = st.button(
-        "🎭 确认添加表情组",
-        type="primary",
-        use_container_width=True,
-    )
-
-    if confirm_btn:
-        label = manual_label.strip().lower() or suggested_emotion
-        classified = {slot: img for slot, (_, img) in final_slot_map.items()}
-
-        # 构建调试数据：按 slot 顺序存对应图片的 AI 结果
-        debug_list = []
-        for slot in _SLOT_ORDER:
-            if slot in final_slot_map:
-                img_idx, _ = final_slot_map[slot]
-                debug_list.append(st.session_state.pending_batch_results[img_idx])
-            else:
-                debug_list.append(None)
-
-        _store_emotion_group_batch(label, classified, debug_list)
 
 
 # ─────────────────────────────────────────────────────
@@ -675,22 +576,6 @@ def _batch_classify_all(batch_round: int):
 
     st.session_state.pending_img_slots = auto_slots
 
-    # 将贪心结果写入 selectbox session state key（在下次渲染时作为默认值）
-    slot_key_options = [None] + _SLOT_ORDER_GLOBAL
-    slot_display_options = ["(不分配)"] + [
-        f"{'眼开+嘴开' if s == 'eo_mo' else '眼开+嘴闭' if s == 'eo_mc' else '眼闭+嘴开' if s == 'ec_mo' else '眼闭+嘴闭'}  ({s})"
-        for s in _SLOT_ORDER_GLOBAL
-    ]
-    for idx in range(4):
-        key = f"slot_select_{idx}_{batch_round}"
-        slot = auto_slots[idx]
-        display = (
-            slot_display_options[slot_key_options.index(slot)]
-            if slot in slot_key_options
-            else "(不分配)"
-        )
-        st.session_state[key] = display
-
     print(f"[BatchClassify] auto_slots={auto_slots}")
 
 
@@ -724,6 +609,7 @@ def _store_emotion_group_batch(label: str, classified: dict, debug_list: list):
     # 清空所有 pending 状态
     st.session_state.pending_batch_images = [None, None, None, None]
     st.session_state.pending_batch_file_ids = [None, None, None, None]
+    st.session_state.pending_batch_filenames = [None, None, None, None]
     st.session_state.pending_batch_results = [None, None, None, None]
     st.session_state.pending_img_slots = [None, None, None, None]
     st.session_state.batch_upload_round += 1
@@ -793,6 +679,140 @@ def _reanalyze_emotion_group(emotion: str):
 
     except Exception as e:
         st.error(f"重新分析失败: {e}")
+
+
+def _auto_register_from_pending():
+    """AI 分析后自动注册表情组；重名时自动追加 _2、_3… 后缀。"""
+    config = st.session_state.config
+    pending_results = st.session_state.pending_batch_results
+    pending_images = st.session_state.pending_batch_images
+    pending_slots = st.session_state.pending_img_slots
+
+    _SLOT_ORDER_LOCAL = ["eo_mo", "eo_mc", "ec_mo", "ec_mc"]
+
+    # 构建最终槽位映射
+    final_slot_map: dict = {}
+    for idx in range(4):
+        img = pending_images[idx]
+        if img is None:
+            continue
+        slot = pending_slots[idx]
+        if slot is None:
+            continue
+        final_slot_map[slot] = (idx, img)
+
+    if not final_slot_map:
+        return  # 没有任何可分配图片，直接跳过
+
+    # 推断情绪名（和旧逻辑保持一致）
+    suggested_emotion = "unknown"
+    suggested_ev: dict = {}
+    for priority_slot in _SLOT_ORDER_LOCAL:
+        if priority_slot in final_slot_map:
+            img_idx, _ = final_slot_map[priority_slot]
+            r = pending_results[img_idx]
+            if r:
+                suggested_emotion = r.get("label") or "unknown"
+                suggested_ev = r.get("emotion_vector", {})
+            break
+
+    # 重名处理：xxx → xxx_2 → xxx_3 …
+    label = suggested_emotion
+    if label in config.emotions:
+        counter = 2
+        while f"{label}_{counter}" in config.emotions:
+            counter += 1
+        label = f"{label}_{counter}"
+
+    classified = {slot: img for slot, (_, img) in final_slot_map.items()}
+    debug_list = []
+    for slot in _SLOT_ORDER_LOCAL:
+        if slot in final_slot_map:
+            img_idx, _ = final_slot_map[slot]
+            debug_list.append(pending_results[img_idx])
+        else:
+            debug_list.append(None)
+
+    # 静默注册（不调用 st.rerun，由调用方负责）
+    assets = st.session_state.assets
+    assets.put_emotion_group(label, classified)
+    emotion_vector = suggested_ev or None
+    # 从 debug_list 取第一个非空 emotion_vector（更准确）
+    for slot_idx, slot in enumerate(_SLOT_ORDER_LOCAL):
+        if (
+            debug_list
+            and slot_idx < len(debug_list)
+            and debug_list[slot_idx] is not None
+        ):
+            ev = debug_list[slot_idx].get("emotion_vector")
+            if ev:
+                emotion_vector = ev
+                break
+    config.add_emotion(label, emotion_vector=emotion_vector)
+    st.session_state.emotion_debug_data[label] = debug_list
+
+    # 清空 pending 状态
+    st.session_state.pending_batch_images = [None, None, None, None]
+    st.session_state.pending_batch_file_ids = [None, None, None, None]
+    st.session_state.pending_batch_filenames = [None, None, None, None]
+    st.session_state.pending_batch_results = [None, None, None, None]
+    st.session_state.pending_img_slots = [None, None, None, None]
+    st.session_state.batch_upload_round += 1
+    st.session_state.upload_round += 1
+    st.session_state["_last_registered_emotion"] = label
+
+
+def _rename_emotion(old_name: str, new_name: str) -> str:
+    """重命名已注册表情组；重名时自动加 _2 后缀。返回最终名称。"""
+    if not new_name or new_name == old_name:
+        return old_name
+    config = st.session_state.config
+    assets = st.session_state.assets
+    _SLOT_ORDER_LOCAL = ["eo_mo", "eo_mc", "ec_mo", "ec_mc"]
+
+    # 处理目标名重复
+    final_name = new_name
+    if final_name in config.emotions and final_name != old_name:
+        counter = 2
+        while f"{final_name}_{counter}" in config.emotions:
+            counter += 1
+        final_name = f"{final_name}_{counter}"
+
+    # 迁移图片
+    slot_imgs = {
+        slot: assets.get(f"{old_name}_{slot}")
+        for slot in _SLOT_ORDER_LOCAL
+        if assets.has(f"{old_name}_{slot}")
+    }
+    assets.remove_emotion_group(old_name)
+    assets.put_emotion_group(final_name, slot_imgs)
+
+    # 更新 config
+    if old_name in config.emotions:
+        idx = config.emotions.index(old_name)
+        config.emotions[idx] = final_name
+    if old_name in config.emotion_vectors:
+        config.emotion_vectors[final_name] = config.emotion_vectors.pop(old_name)
+
+    # 迁移调试数据
+    if old_name in st.session_state.emotion_debug_data:
+        st.session_state.emotion_debug_data[final_name] = (
+            st.session_state.emotion_debug_data.pop(old_name)
+        )
+    return final_name
+
+
+def _reassign_slots(emotion: str, slot_images: dict, new_assignments: dict):
+    """将已注册表情组的各图片重新分配到新的槽位（就地修改）。"""
+    assets = st.session_state.assets
+    # 构建 new_slot -> image 映射（同一 new_slot 有多张时保留最后一张）
+    new_slot_to_img: dict = {}
+    for orig_slot, new_slot in new_assignments.items():
+        img = slot_images[orig_slot]
+        new_slot_to_img[new_slot] = img
+    # 先清空再写入
+    assets.remove_emotion_group(emotion)
+    assets.put_emotion_group(emotion, new_slot_to_img)
 
 
 # ──────────────────────────────────────────────
@@ -882,6 +902,7 @@ def _tab_generate(
     emotion_backend: str,
     segment_seconds: float,
     force_switch_seconds: float = 0.0,
+    gesture_min_hold: float = 1.5,
 ):
     """生成视频界面。"""
     config = st.session_state.config
@@ -926,7 +947,12 @@ def _tab_generate(
 
     if st.button("🎬 开始生成视频", type="primary", use_container_width=True):
         _run_pipeline(
-            fps, smoothing, emotion_backend, segment_seconds, force_switch_seconds
+            fps,
+            smoothing,
+            emotion_backend,
+            segment_seconds,
+            force_switch_seconds,
+            gesture_min_hold,
         )
 
 
@@ -936,26 +962,36 @@ def _run_pipeline(
     emotion_backend: str,
     segment_seconds: float = 1.0,
     force_switch_seconds: float = 0.0,
+    gesture_min_hold: float = 1.5,
 ):
-    """执行完整生成管线。"""
+    """执行完整生成管线（已优化：并行渲染 + 硬件编码 + 精细进度）。"""
     config = st.session_state.config
     assets = st.session_state.assets
     audio_bytes: bytes = st.session_state.audio_bytes
     audio_suffix: str = st.session_state.audio_suffix
 
     progress = st.progress(0, text="准备中...")
+    perf_info = st.empty()  # 性能信息占位
+
+    import time as _time
+
+    t_start = _time.perf_counter()
+    timings: dict = {}
 
     try:
-        # Step 1: 音频分析（传入内存字节，不需要文件路径）
+        # Step 1: 音频分析
         progress.progress(5, text="🔍 分析音频特征...")
+        t0 = _time.perf_counter()
         from vtuber_engine.audio.analyzer import AudioAnalyzer
 
         analyzer = AudioAnalyzer(fps=fps)
         audio_features = analyzer.analyze(audio_bytes)
         st.session_state.audio_features = audio_features
+        timings["音频分析"] = _time.perf_counter() - t0
 
         # Step 2: 情绪分析
-        progress.progress(20, text="🧠 AI 情绪识别...")
+        progress.progress(15, text="🧠 AI 情绪识别...")
+        t0 = _time.perf_counter()
         from vtuber_engine.audio.emotion_engine import EmotionEngine
 
         emotion_engine = EmotionEngine(
@@ -968,63 +1004,99 @@ def _run_pipeline(
             segment_seconds=segment_seconds,
         )
         st.session_state.emotion_vectors = emotion_vectors
+        timings["情绪分析"] = _time.perf_counter() - t0
 
         # Step 3: 状态计算
-        progress.progress(35, text="🎯 计算角色状态...")
+        progress.progress(30, text="🎯 计算角色状态...")
+        t0 = _time.perf_counter()
         from vtuber_engine.core.state_engine import StateEngine
 
         state_engine = StateEngine(
-            config, fps=fps, force_switch_seconds=force_switch_seconds
+            config,
+            fps=fps,
+            force_switch_seconds=force_switch_seconds,
+            gesture_min_hold_seconds=gesture_min_hold,
         )
         states = state_engine.process(audio_features, emotion_vectors)
+        timings["状态计算"] = _time.perf_counter() - t0
 
         # Step 4: 动画平滑
-        progress.progress(45, text="✨ 动画插值平滑...")
+        progress.progress(40, text="✨ 动画插值平滑...")
+        t0 = _time.perf_counter()
         from vtuber_engine.core.animation_engine import AnimationEngine
 
         anim_engine = AnimationEngine(smoothing=smoothing)
         animated_states = anim_engine.process(states)
+        timings["动画平滑"] = _time.perf_counter() - t0
 
-        # Step 5: 渲染帧
-        progress.progress(55, text="🖼️ 渲染帧图像...")
+        # Step 5: 渲染帧（利用优化后的 render_sequence：去重 + 并行）
+        progress.progress(50, text="🖼️ 渲染帧图像...")
+        t0 = _time.perf_counter()
         from vtuber_engine.render.renderer import Renderer
 
         renderer = Renderer(config, assets)
-
         total_frames = len(animated_states)
-        frames = []
-        for i, state in enumerate(animated_states):
-            frame = renderer.render_frame(state)
-            frames.append(frame)
-            if i % 10 == 0:
-                pct = 55 + int((i / total_frames) * 30)
-                progress.progress(pct, text=f"🖼️ 渲染帧 {i}/{total_frames}...")
 
-        # Step 6: 导出视频
-        progress.progress(90, text="🎬 导出视频...")
+        def _render_progress(current, total):
+            pct = 50 + int((current / max(total, 1)) * 25)
+            progress.progress(min(pct, 75), text=f"🖼️ 渲染帧 {current}/{total}...")
+
+        frames = renderer.render_sequence(
+            animated_states, progress_callback=_render_progress
+        )
+        timings["帧渲染"] = _time.perf_counter() - t0
+
+        # Step 6: 导出视频（硬件编码 + 缓冲写入）
+        progress.progress(78, text="🎬 导出视频...")
+        t0 = _time.perf_counter()
         from vtuber_engine.export.video_exporter import VideoExporter
 
         output_dir = tempfile.mkdtemp(prefix="vtuber_output_")
         exporter = VideoExporter(fps=fps, output_dir=output_dir)
+        encoder_info = exporter.get_encoder_info()
+
+        def _export_progress(current, total):
+            pct = 78 + int((current / max(total, 1)) * 18)
+            progress.progress(
+                min(pct, 96), text=f"🎬 编码帧 {current}/{total} [{encoder_info}]..."
+            )
+
         output_path = exporter.export(
             frames=frames,
             audio_bytes=audio_bytes,
             audio_suffix=audio_suffix,
             output_filename="output.mp4",
+            progress_callback=_export_progress,
         )
+        timings["视频导出"] = _time.perf_counter() - t0
 
         # 读取视频到内存
         with open(output_path, "rb") as f:
             st.session_state.video_bytes = f.read()
 
+        total_time = _time.perf_counter() - t_start
         progress.progress(100, text="✅ 完成！")
 
-        # 显示结果
+        # 显示结果 + 性能信息
         st.balloons()
         st.success(
             f"🎉 视频生成完成！ 共 {total_frames} 帧，"
-            f"时长 {audio_features.duration:.1f} 秒"
+            f"时长 {audio_features.duration:.1f} 秒，"
+            f"总耗时 {total_time:.1f} 秒"
         )
+
+        # 性能分析面板
+        with st.expander("⏱️ 性能详情", expanded=False):
+            cols = st.columns(len(timings))
+            for col, (step_name, step_time) in zip(cols, timings.items()):
+                with col:
+                    st.metric(step_name, f"{step_time:.1f}s")
+            st.caption(
+                f"编码器: {encoder_info} | "
+                f"帧率: {fps} fps | "
+                f"分辨率: {config.resolution[0]}×{config.resolution[1]} | "
+                f"独立帧: {len(renderer._frame_cache)}/{total_frames}"
+            )
 
     except Exception as e:
         progress.empty()
@@ -1073,18 +1145,18 @@ def _show_analysis():
     # 音量波形
     if features.volume:
         st.markdown("**音量 (RMS)**")
-        st.line_chart(list(features.volume), height=150)
+        _mpl_line(list(features.volume), height=150)
 
     # 基频
     if features.pitch:
         st.markdown("**基频 (Hz)**")
-        st.line_chart(list(features.pitch), height=150)
+        _mpl_line(list(features.pitch), height=150, color="#ff7f0e")
 
     # 说话段
     if features.is_speaking:
         speaking_float = [1.0 if s else 0.0 for s in features.is_speaking]
         st.markdown("**语音活动 (VAD)**")
-        st.bar_chart(speaking_float, height=100)
+        _mpl_bar(speaking_float, height=100, color="#2ca02c")
 
     # 情绪分析
     if emotions:
@@ -1098,11 +1170,9 @@ def _show_analysis():
         with col1:
             st.markdown("**情绪权重（中间时刻）**")
             from vtuber_engine.models.data_models import EMOTION_KEYS
-            emotion_data = {
-                "情绪": EMOTION_KEYS,
-                "权重": [getattr(sample, k, 0.0) for k in EMOTION_KEYS],
-            }
-            st.bar_chart(emotion_data, x="情绪", y="权重", height=250)
+
+            ev_values = [getattr(sample, k, 0.0) for k in EMOTION_KEYS]
+            _mpl_hbar(EMOTION_KEYS, ev_values, height=250)
 
         with col2:
             st.markdown("**主要情绪**")
@@ -1114,13 +1184,56 @@ def _show_analysis():
         if len(emotions) > 1:
             energy_curve = [e.energy for e in emotions]
             st.markdown("**能量曲线（逐帧）**")
-            st.line_chart(energy_curve, height=150)
+            _mpl_line(energy_curve, height=150, color="#9467bd")
+
+
+# ─────────────────────────────────────────────────────
+# Matplotlib 图表辅助（规避 pyarrow DLL 问题）
+# ─────────────────────────────────────────────────────
+
+
+def _mpl_line(data: list, height: int = 150, color: str = "#1f77b4"):
+    """用 matplotlib 画折线图，替代 st.line_chart（避免 pyarrow）。"""
+    fig, ax = plt.subplots(figsize=(8, max(1.2, height / 100)))
+    ax.plot(data, linewidth=0.8, color=color)
+    ax.margins(x=0.01)
+    ax.set_xticks([])
+    ax.tick_params(labelsize=7)
+    fig.tight_layout(pad=0.3)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def _mpl_bar(data: list, height: int = 100, color: str = "#1f77b4"):
+    """用 matplotlib 画柱状图，替代 st.bar_chart（避免 pyarrow）。"""
+    fig, ax = plt.subplots(figsize=(8, max(1.0, height / 100)))
+    ax.bar(range(len(data)), data, width=1.0, color=color)
+    ax.margins(x=0.01)
+    ax.set_xticks([])
+    ax.tick_params(labelsize=7)
+    fig.tight_layout(pad=0.3)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def _mpl_hbar(keys: list, values: list, height: int = 250):
+    """用 matplotlib 画水平条形图（情绪权重），替代 st.bar_chart with x/y（避免 pyarrow）。"""
+    fig, ax = plt.subplots(figsize=(5, max(2.0, height / 100)))
+    y_pos = range(len(keys))
+    ax.barh(list(y_pos), values, color="#1f77b4")
+    ax.set_yticks(list(y_pos))
+    ax.set_yticklabels(keys, fontsize=8)
+    ax.set_xlim(0, max(values) * 1.1 + 0.01)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout(pad=0.3)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
 
 
 # 各后端预设模型列表
 _TEXT_MODEL_PRESETS: dict[str, list[str]] = {
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
-    "qwen": ["qwen-plus", "qwen3.5-plus", "qwen-max", "qwen-turbo", "qwen3-235b-a22b"],
+    "qwen": ["qwen-plus", "qwen-max", "qwen-turbo", "qwen3-235b-a22b", "qwen3-32b"],
     "rule": [],
 }
 
@@ -1253,6 +1366,7 @@ def main():
         vision_backend,
         segment_seconds,
         force_switch_seconds,
+        gesture_min_hold,
     ) = _sidebar_config()
     st.session_state.vision_backend = vision_backend
 
@@ -1274,7 +1388,12 @@ def main():
 
     with tab3:
         _tab_generate(
-            fps, smoothing, emotion_backend, segment_seconds, force_switch_seconds
+            fps,
+            smoothing,
+            emotion_backend,
+            segment_seconds,
+            force_switch_seconds,
+            gesture_min_hold,
         )
 
     with tab4:

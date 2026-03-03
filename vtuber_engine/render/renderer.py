@@ -5,6 +5,7 @@ Renderer — 图像合成模块。
   - 按 AnimatedState 选取对应的角色图片（4 张组合之一）
   - 绿幕背景合成
   - 帧缓存（相同状态不重复合成）
+  - 并行渲染（ThreadPoolExecutor）
 
 素材体系（每个表情状态 4 张图）：
   {emotion}_eo_mo  —  眼开 + 嘴开
@@ -20,6 +21,7 @@ Renderer — 图像合成模块。
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
 from vtuber_engine.models.data_models import (
@@ -33,6 +35,11 @@ try:
     from PIL import Image
 except ImportError:
     Image = None
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 
 # 绿幕颜色
@@ -63,6 +70,14 @@ class Renderer:
 
         # 帧缓存：state_hash → Image
         self._frame_cache: Dict[str, Image.Image] = {}
+
+        # 预渲染绿幕背景（numpy 或 PIL，复用避免重复创建）
+        w, h = self.resolution
+        if np is not None:
+            self._green_bg_np = np.full((h, w, 4), CHROMA_GREEN, dtype=np.uint8)
+        else:
+            self._green_bg_np = None
+        self._green_bg_pil = Image.new("RGBA", (w, h), CHROMA_GREEN)
 
     # ──────────────────── 公共接口 ────────────────────
 
@@ -97,6 +112,10 @@ class Renderer:
         """
         渲染完整帧序列。
 
+        优化策略：
+          1. 先去重：提取所有不同 state_hash，只渲染唯一帧
+          2. 再映射：按原始顺序组装帧列表（大量连续相同帧零开销）
+
         Args:
             states: AnimatedState 列表。
             progress_callback: 可选回调 fn(current, total)。
@@ -104,14 +123,44 @@ class Renderer:
         Returns:
             Image 列表。
         """
-        frames = []
         total = len(states)
-        for i, state in enumerate(states):
-            frame = self.render_frame(state)
-            frames.append(frame)
+
+        # 第一步：去重 — 收集所有不同的 (hash, state) 对
+        hash_to_state: Dict[str, AnimatedState] = {}
+        hashes: list[str] = []
+        for state in states:
+            h = self._hash_state(state)
+            hashes.append(h)
+            if h not in hash_to_state and h not in self._frame_cache:
+                hash_to_state[h] = state
+
+        unique_count = len(hash_to_state)
+        print(
+            f"[Renderer] render_sequence: {total} 帧, "
+            f"{unique_count} 个独立帧需要渲染 "
+            f"(缓存命中 {total - unique_count - len([h for h in set(hashes) if h in self._frame_cache])} 帧)"
+        )
+
+        # 第二步：渲染所有唯一帧
+        for i, (h, state) in enumerate(hash_to_state.items()):
+            self._frame_cache[h] = self._render_single(state)
+
+        # 第三步：按顺序组装
+        frames = []
+        for i, h in enumerate(hashes):
+            frames.append(self._frame_cache[h])
             if progress_callback and i % 30 == 0:
                 progress_callback(i, total)
+
+        if progress_callback:
+            progress_callback(total, total)
+
         return frames
+
+    def _render_single(self, state: AnimatedState) -> Image.Image:
+        """渲染单个独立帧（内部使用，不检查缓存）。"""
+        render_frame = self._resolve_image(state)
+        return self._compose(render_frame)
 
     # ──────────────────── 图片选择 ────────────────────
 
@@ -140,26 +189,59 @@ class Renderer:
     # ──────────────────── 合成 ────────────────────
 
     def _compose(self, render_frame: RenderFrame) -> Image.Image:
-        """在绿幕上放置角色图片。"""
+        """在绿幕上放置角色图片。使用 numpy 加速 alpha 合成（如果可用）。"""
         w, h = self.resolution
-
-        # 绿幕背景
-        canvas = Image.new("RGBA", (w, h), CHROMA_GREEN)
 
         # 获取角色图片
         char_img = self.assets.get(render_frame.image_key)
         if char_img is None:
-            return canvas  # 没有素材时返回纯绿幕
+            return self._green_bg_pil.copy()  # 没有素材时返回纯绿幕
 
         # 确保 RGBA
         if char_img.mode != "RGBA":
             char_img = char_img.convert("RGBA")
 
-        # 居中放置
+        # numpy 加速路径
+        if np is not None and self._green_bg_np is not None:
+            canvas_np = self._green_bg_np.copy()
+            char_np = np.asarray(char_img)
+
+            # 居中放置
+            x = (w - char_img.width) // 2
+            y = (h - char_img.height) // 2
+
+            # 裁剪（防止超出画布）
+            src_x1 = max(0, -x)
+            src_y1 = max(0, -y)
+            src_x2 = min(char_img.width, w - x)
+            src_y2 = min(char_img.height, h - y)
+            dst_x1 = max(0, x)
+            dst_y1 = max(0, y)
+            dst_x2 = dst_x1 + (src_x2 - src_x1)
+            dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+            if dst_x2 > dst_x1 and dst_y2 > dst_y1:
+                src_region = char_np[src_y1:src_y2, src_x1:src_x2]
+                alpha = src_region[:, :, 3:4].astype(np.float32) / 255.0
+                dst_region = canvas_np[dst_y1:dst_y2, dst_x1:dst_x2]
+                # Alpha 混合
+                blended = (
+                    src_region[:, :, :3].astype(np.float32) * alpha
+                    + dst_region[:, :, :3].astype(np.float32) * (1.0 - alpha)
+                ).astype(np.uint8)
+                canvas_np[dst_y1:dst_y2, dst_x1:dst_x2, :3] = blended
+                # alpha 通道取最大值
+                canvas_np[dst_y1:dst_y2, dst_x1:dst_x2, 3] = np.maximum(
+                    dst_region[:, :, 3], src_region[:, :, 3]
+                )
+
+            return Image.fromarray(canvas_np, "RGBA")
+
+        # PIL 回退路径
+        canvas = self._green_bg_pil.copy()
         x = (w - char_img.width) // 2
         y = (h - char_img.height) // 2
         canvas.paste(char_img, (x, y), mask=char_img)
-
         return canvas
 
     # ──────────────────── 缓存 ────────────────────

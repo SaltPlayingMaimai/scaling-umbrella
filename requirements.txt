@@ -7,6 +7,7 @@ python-dotenv>=1.0.0
 
 # ─── UI ───
 streamlit>=1.30.0
+matplotlib>=3.7.0
 
 # ─── Audio Analysis ───
 librosa>=0.10.0

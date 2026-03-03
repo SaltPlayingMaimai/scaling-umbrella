@@ -42,12 +42,14 @@ class StateEngine:
         character_config: CharacterConfig,
         fps: int = 30,
         force_switch_seconds: float = 0.0,
+        gesture_min_hold_seconds: float = 5.0,
     ):
         """
         Args:
             character_config: 角色配置。
             fps: 帧率。
             force_switch_seconds: 强制切换表情的最长秒数（0 = 不启用）。
+            gesture_min_hold_seconds: 动作切换后最小停留秒数（防止跳变）。
         """
         self.config = character_config
         self.fps = fps
@@ -67,6 +69,11 @@ class StateEngine:
         self._current_emotion_frames = 0  # 当前表情持续的帧数
         self._waiting_for_sentence_start = False  # 是否在等待句首切换点
         self._prev_is_speaking = False  # 上一帧的 is_speaking 状态
+
+        # 动作（gesture）防抖状态
+        self._current_gesture: int = 0
+        self._gesture_hold_frames: int = 0
+        self._gesture_min_hold_frames: int = max(1, int(gesture_min_hold_seconds * fps))
 
     # ──────────────────── 公共接口 ────────────────────
 
@@ -331,12 +338,26 @@ class StateEngine:
             return math.sin(self._blink_progress * math.pi)
 
     def _decide_gesture(self, energy: float) -> int:
-        """根据能量决定动作。"""
+        """根据能量决定动作，带最小停留时间防止跳变。"""
+        # 目标 gesture
         if energy > 0.8:
-            return 2  # 大幅动作
+            target = 2
         elif energy > 0.5:
-            return 1  # 小幅动作
-        return 0  # 无动作
+            target = 1
+        else:
+            target = 0
+
+        self._gesture_hold_frames += 1
+
+        # 只有持续足够长时间才允许切换
+        if (
+            target != self._current_gesture
+            and self._gesture_hold_frames >= self._gesture_min_hold_frames
+        ):
+            self._current_gesture = target
+            self._gesture_hold_frames = 0
+
+        return self._current_gesture
 
     def _smooth_state(self, state: CharacterState) -> CharacterState:
         """
