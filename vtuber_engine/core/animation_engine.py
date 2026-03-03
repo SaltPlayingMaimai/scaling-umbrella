@@ -47,12 +47,29 @@ class AnimationEngine:
         Returns:
             平滑后的 AnimatedState 列表。
         """
+        total = len(states)
+        print(
+            f"[AnimationEngine] process() start: total_frames={total}, smoothing={self.smoothing}"
+        )
+
         results: list[AnimatedState] = []
 
-        for state in states:
+        for i, state in enumerate(states):
             animated = self._interpolate_frame(state)
             results.append(animated)
 
+            # 首/末帧 及每 30 帧打印一次
+            if i == 0 or i == total - 1 or (i > 0 and i % 30 == 0):
+                print(
+                    f"[AnimationEngine] frame[{i:04d}] "
+                    f"emotion='{animated.emotion}' "
+                    f"mouth_open={animated.mouth_open:.4f} "
+                    f"blink_phase={animated.blink_phase:.4f} "
+                    f"energy={animated.energy:.4f} "
+                    f"gesture={animated.gesture}"
+                )
+
+        print(f"[AnimationEngine] process() done: {len(results)} animated frames")
         return results
 
     # ──────────────────── 内部逻辑 ────────────────────

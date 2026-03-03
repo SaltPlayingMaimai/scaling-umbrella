@@ -36,11 +36,19 @@ SYSTEM_PROMPT = (
     "1. Determine the emotion PRIMARILY from the [eyes open + mouth open] sprite, "
     "as it best shows the full facial expression. "
     "If that sprite is absent, use [eyes open + mouth closed] instead.\n"
-    "2. Reply with ONLY a single English word — the emotion label (lowercase).\n"
-    "3. Common labels: calm, happy, excited, sad, angry, panic, surprised, shy, smug, tired, etc.\n"
-    "4. If existing emotions are provided, avoid duplicating them unless the image clearly matches.\n"
-    "5. Do NOT output any explanation, punctuation, or extra text — just the one word.\n"
+    "2. **Eye-priority**: Focus on the EYES first — eye shape, eyelid position, pupil size, "
+    "eyebrow angle are the primary indicators of emotion. "
+    "Mouth is secondary; only use it to refine or disambiguate.\n"
+    "3. Reply with ONLY a single English word — the emotion label (lowercase).\n"
+    "4. Common labels: calm, happy, excited, sad, angry, panic, surprised, shy, smug, tired, etc.\n"
+    "5. If existing emotions are provided, avoid duplicating them unless the image clearly matches.\n"
+    "6. Do NOT output any explanation, punctuation, or extra text — just the one word.\n"
 )
+
+# 标准情绪维度列表（与 data_models.EMOTION_KEYS 对齐）
+from vtuber_engine.models.data_models import EMOTION_KEYS
+
+EMOTION_DIMENSIONS = EMOTION_KEYS
 
 CLASSIFY_SYSTEM_PROMPT = (
     "You are a character sprite classifier for a VTuber/Live2D avatar system.\n"
@@ -51,12 +59,38 @@ CLASSIFY_SYSTEM_PROMPT = (
     "   eo_mc = eyes open  + mouth closed\n"
     "   ec_mo = eyes closed + mouth open\n"
     "   ec_mc = eyes closed + mouth closed\n"
-    "2. Determine the emotion label from the eo_mo image (eyes open + mouth open) ONLY.\n"
+    "2. Analyze the expression and output an emotion_vector from the eo_mo image.\n"
     "   If no eo_mo image exists, use eo_mc; if neither exists, use any available image.\n\n"
+    "**Facial analysis priority (high to low):**\n"
+    "- EYEBROWS (30%): angle (raised/furrowed/flat), curvature, asymmetry.\n"
+    "  Raised brows = surprise/excitement; furrowed brows = anger/concentration; soft arch = calm/tender.\n"
+    "- EYES (35%): openness, pupil size/shape (sparkles/stars/hearts = excitement/love),\n"
+    "  eyelid droop (tired/sad), tear marks, eye direction, iris patterns or symbols.\n"
+    "- MOUTH (20%): open/closed, smile/frown/pout, teeth visibility, tongue out.\n"
+    "- OTHER (15%): blush marks (shy/embarrassed), sweat drops (panic/nervous), overall face tilt.\n"
+    "Report observations in eyebrow_analysis, eye_analysis, mouth_analysis fields.\n\n"
     "Respond ONLY with valid JSON — no markdown fences, no comments, no extra text:\n"
-    '{"emotion": "<single_word_lowercase>", "assignments": '
-    '{"eo_mo": <1-based_int_or_null>, "eo_mc": <1-based_int_or_null>, '
-    '"ec_mo": <1-based_int_or_null>, "ec_mc": <1-based_int_or_null>}}\n\n'
+    '{"label": "<unique_compound_label>", '
+    '"eyebrow_analysis": "<brief eyebrow description>", '
+    '"eye_analysis": "<brief eye expression description>", '
+    '"mouth_analysis": "<brief mouth expression description>", '
+    '"emotion_vector": {'
+    '"calm": <0-1>, "happy": <0-1>, "excited": <0-1>, "sad": <0-1>, '
+    '"angry": <0-1>, "panic": <0-1>, "shy": <0-1>, "surprised": <0-1>, '
+    '"tender": <0-1>, "smug": <0-1>, "tired": <0-1>, "confused": <0-1>}, '
+    '"assignments": {"eo_mo": <int_or_null>, "eo_mc": <int_or_null>, '
+    '"ec_mo": <int_or_null>, "ec_mc": <int_or_null>}}\n\n'
+    "Field rules:\n"
+    "- label: short unique identifier, 1-3 lowercase words joined by underscores. "
+    "  Append a distinguishing modifier when the primary emotion may be duplicated "
+    "  (e.g. happy_bright, happy_shy, calm_tired, angry_tense). Single word is fine if unique.\n"
+    "- eyebrow_analysis: 1 short sentence about eyebrow shape, angle, and what it conveys.\n"
+    "- eye_analysis: 1 short sentence about eye state including any special symbols or patterns inside the eyes.\n"
+    "- mouth_analysis: 1 short sentence about the mouth expression.\n"
+    "- emotion_vector: percentage weights for ALL 12 emotion dimensions. "
+    "  All values 0.0-1.0, they should sum to approximately 1.0. "
+    "  Use fine-grained distinctions: e.g. a shy smile is NOT just happy—it should have "
+    "  high shy + some happy + some calm. An excited grin should be high excited + some happy.\n"
     "Detection rules:\n"
     "- Eyes open:  irises and pupils clearly visible; eyelids raised.\n"
     "- Eyes closed: eyelids are shut or nearly shut, irises not visible.\n"
@@ -75,7 +109,15 @@ SINGLE_CLASSIFY_SYSTEM_PROMPT = (
     "Your tasks:\n"
     "1. Classify this image into the best-matching slot.\n"
     "2. Estimate the probability for each of the four possible slots.\n"
-    "3. Identify the emotion expressed in this image.\n\n"
+    "3. Output an emotion_vector representing the blend of emotions.\n\n"
+    "**Facial analysis priority (high to low):**\n"
+    "- EYEBROWS (30%): angle (raised/furrowed/flat), curvature, asymmetry.\n"
+    "  Raised brows = surprise/excitement; furrowed brows = anger/concentration; soft arch = calm/tender.\n"
+    "- EYES (35%): openness, pupil size/shape (sparkles/stars/hearts = excitement/love),\n"
+    "  eyelid droop (tired/sad), tear marks, eye direction, iris patterns or symbols.\n"
+    "- MOUTH (20%): open/closed, smile/frown/pout, teeth visibility, tongue out.\n"
+    "- OTHER (15%): blush marks (shy/embarrassed), sweat drops (panic/nervous), overall face tilt.\n"
+    "Report observations in eyebrow_analysis, eye_analysis, mouth_analysis fields.\n\n"
     "Slot definitions:\n"
     "   eo_mo = eyes open  + mouth open\n"
     "   eo_mc = eyes open  + mouth closed\n"
@@ -89,17 +131,29 @@ SINGLE_CLASSIFY_SYSTEM_PROMPT = (
     "- ec_mo (eyes closed + mouth open) is a valid and common state.\n\n"
     "Respond ONLY with valid JSON — no markdown fences, no comments, no extra text:\n"
     '{"assigned_slot": "<best_slot>", '
-    '"probabilities": {"eo_mo": <0.0-1.0>, "eo_mc": <0.0-1.0>, '
-    '"ec_mo": <0.0-1.0>, "ec_mc": <0.0-1.0>}, '
-    '"emotion": "<single_word_lowercase>"}\n\n'
+    '"probabilities": {"eo_mo": <0-1>, "eo_mc": <0-1>, '
+    '"ec_mo": <0-1>, "ec_mc": <0-1>}, '
+    '"label": "<unique_compound_label>", '
+    '"eyebrow_analysis": "<brief eyebrow description>", '
+    '"eye_analysis": "<brief eye expression description>", '
+    '"mouth_analysis": "<brief mouth expression description>", '
+    '"emotion_vector": {'
+    '"calm": <0-1>, "happy": <0-1>, "excited": <0-1>, "sad": <0-1>, '
+    '"angry": <0-1>, "panic": <0-1>, "shy": <0-1>, "surprised": <0-1>, '
+    '"tender": <0-1>, "smug": <0-1>, "tired": <0-1>, "confused": <0-1>}}\n\n'
     "Output rules:\n"
     "- assigned_slot: the slot key with the highest probability.\n"
     "- probabilities: must sum to ~1.0. A clearly open mouth must NOT have high\n"
     "  probability in mc (mouth-closed) slots.\n"
-    "- emotion: a single lowercase English word for the facial expression\n"
-    "  (e.g. calm, happy, excited, sad, angry, panic, surprised, shy, smug, tired).\n"
-    "  For eyes-closed images, infer from mouth shape and overall expression.\n"
-    "  Do NOT use slot names (eo_mo, eo_mc, ec_mo, ec_mc) as emotion labels.\n"
+    "- label: short unique identifier (1-3 words, underscores, no spaces). "
+    "  Append a modifier when the primary emotion may be ambiguous or duplicated "
+    "  (e.g. happy_bright, happy_shy, calm_tired, angry_tense). Single word is fine if unique.\n"
+    "- eyebrow_analysis: 1 short sentence about eyebrow expression.\n"
+    "- eye_analysis: 1 short sentence about eye expression including any special patterns.\n"
+    "- mouth_analysis: 1 short sentence about the mouth expression.\n"
+    "- emotion_vector: percentage weights for ALL 12 emotion dimensions "
+    "  (calm, happy, excited, sad, angry, panic, shy, surprised, tender, smug, tired, confused). "
+    "  All values 0.0-1.0, sum to ~1.0. Use fine-grained distinctions.\n"
 )
 
 IMAGE_LABELS = {
@@ -119,11 +173,21 @@ def _pil_to_base64(image) -> str:
 
 
 def _clean_label(raw: str) -> str:
-    """从 AI 原始输出中提取干净的单词标签。"""
+    """从 AI 原始输出中提取干净的复合标签（如 happy、happy_bright）。"""
     label = raw.strip().lower()
     label = label.strip(".,!?\"' ")
-    label = label.split()[0] if label else "unknown"
-    return label
+    # 移除可能包裹的引号
+    label = label.strip("'\"")
+    if not label:
+        return "unknown"
+    # 如果已经是下划线连接形式（如 happy_bright），直接保留
+    # 如果是空格连接（如 "happy bright"），转为下划线，最多取前 3 个词
+    parts = label.replace("-", "_").split()
+    parts = [p for p in parts if p.isalpha() or ("_" in p)]
+    if not parts:
+        return "unknown"
+    # 最多保留三段
+    return "_".join(parts[:3])
 
 
 # ──────────────────────────────────────────────
@@ -350,7 +414,10 @@ def _parse_classify_response(
     解析 AI 返回的 JSON，映射图片索引到分类键。
 
     Returns:
-        (emotion: str, classified: dict)  其中 classified = {slot: PIL.Image or None}
+        (label: str, emotion_vector: dict, classified: dict)
+        label: 唯一复合标签（如 happy_bright）
+        emotion_vector: 情绪百分比向量 {calm: 0.1, happy: 0.6, ...}
+        classified: {slot: PIL.Image or None}
     """
     # 去除可能的 markdown 代码块
     text = raw_text.strip()
@@ -369,7 +436,30 @@ def _parse_classify_response(
         else:
             raise ValueError(f"AI 返回的内容无法解析为 JSON：{raw_text[:200]}")
 
-    emotion = _clean_label(data.get("emotion", "unknown"))
+    # label 字段（向量驱动，无文字情绪）
+    raw_label = data.get("label", "unknown")
+    label = _clean_label(raw_label)
+
+    # 解析情绪向量（百分比）
+    raw_ev = data.get("emotion_vector", {})
+    emotion_vector: dict = {}
+    for dim in EMOTION_DIMENSIONS:
+        emotion_vector[dim] = float(raw_ev.get(dim, 0.0))
+    # 归一化
+    ev_total = sum(emotion_vector.values()) or 1.0
+    emotion_vector = {k: round(v / ev_total, 3) for k, v in emotion_vector.items()}
+
+    eyebrow_analysis = data.get("eyebrow_analysis", "")
+    eye_analysis = data.get("eye_analysis", "")
+    mouth_analysis = data.get("mouth_analysis", "")
+
+    print(
+        f"[ImageRecognizer][classify] label='{label}', "
+        f"emotion_vector={emotion_vector}, "
+        f"eyebrow='{eyebrow_analysis[:60]}', "
+        f"eye='{eye_analysis[:60]}', mouth='{mouth_analysis[:60]}'"
+    )
+
     assignments: dict = data.get("assignments", {})
 
     classified: dict = {slot: None for slot in IMAGE_LABELS}
@@ -380,7 +470,7 @@ def _parse_classify_response(
         if 0 <= idx_int < len(images_list):
             classified[slot] = images_list[idx_int]
 
-    return emotion, classified
+    return label, emotion_vector, classified
 
 
 def _classify_openai(
@@ -441,7 +531,7 @@ def _classify_openai(
             {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
             {"role": "user", "content": content_parts},
         ],
-        max_tokens=120,
+        max_tokens=300,
         temperature=0.1,
     )
 
@@ -456,12 +546,13 @@ def _classify_openai(
     if not raw:
         raise ValueError("OpenAI API 返回了空的 message 内容。请重试。")
     print(f"[ImageRecognizer][OpenAI][classify] raw_response={repr(raw)!r}")
-    result = _parse_classify_response(raw, images_list)
+    label, emotion_vector, classified2 = _parse_classify_response(raw, images_list)
     print(
-        f"[ImageRecognizer][OpenAI][classify] emotion='{result[0]}', "
-        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
+        f"[ImageRecognizer][OpenAI][classify] label='{label}', "
+        f"emotion_vector={emotion_vector}, "
+        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(classified2[k]))+1 if classified2.get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
     )
-    return result
+    return label, emotion_vector, classified2
 
 
 def _classify_qwen(
@@ -559,12 +650,13 @@ def _classify_qwen(
         raise ValueError("Qwen API 返回的文本内容为空。")
 
     print(f"[ImageRecognizer][Qwen][classify] raw_response={repr(raw)!r}")
-    result = _parse_classify_response(raw, images_list)
+    label, emotion_vector, classified2 = _parse_classify_response(raw, images_list)
     print(
-        f"[ImageRecognizer][Qwen][classify] emotion='{result[0]}', "
-        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(result[1][k]))+1 if result[1].get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
+        f"[ImageRecognizer][Qwen][classify] label='{label}', "
+        f"emotion_vector={emotion_vector}, "
+        f"assignments={{ {', '.join(f'{k}: img#{[id(v) for v in images_list].index(id(classified2[k]))+1 if classified2.get(k) is not None else None}' for k in IMAGE_LABELS)} }}"
     )
-    return result
+    return label, emotion_vector, classified2
 
 
 # ──────────────────────────────────────────────
@@ -580,7 +672,11 @@ def _parse_single_classify_response(raw_text: str) -> dict:
         {
             "assigned_slot": str,
             "probabilities": {slot: float},
-            "emotion": str,
+            "label": str,               # 唯一复合标签，如 happy_bright
+            "eyebrow_analysis": str,     # 眉毛分析
+            "eye_analysis": str,         # 眼部分析
+            "mouth_analysis": str,       # 嘴部分析
+            "emotion_vector": dict,      # 情绪百分比向量 (12 维)
         }
     """
     text = raw_text.strip()
@@ -605,8 +701,30 @@ def _parse_single_classify_response(raw_text: str) -> dict:
     probs = {k: round(v / total, 4) for k, v in probs.items()}
     if assigned not in IMAGE_LABELS:
         assigned = max(probs, key=probs.get)
-    emotion = _clean_label(data.get("emotion", "unknown"))
-    return {"assigned_slot": assigned, "probabilities": probs, "emotion": emotion}
+    # label: 直接取 label 字段
+    raw_label = data.get("label", "unknown")
+    label = _clean_label(raw_label)
+    eyebrow_analysis: str = data.get("eyebrow_analysis", "")
+    eye_analysis: str = data.get("eye_analysis", "")
+    mouth_analysis: str = data.get("mouth_analysis", "")
+
+    # 解析情绪向量
+    raw_ev = data.get("emotion_vector", {})
+    emotion_vector: dict = {}
+    for dim in EMOTION_DIMENSIONS:
+        emotion_vector[dim] = float(raw_ev.get(dim, 0.0))
+    ev_total = sum(emotion_vector.values()) or 1.0
+    emotion_vector = {k: round(v / ev_total, 3) for k, v in emotion_vector.items()}
+
+    return {
+        "assigned_slot": assigned,
+        "probabilities": probs,
+        "label": label,
+        "eyebrow_analysis": eyebrow_analysis,
+        "eye_analysis": eye_analysis,
+        "mouth_analysis": mouth_analysis,
+        "emotion_vector": emotion_vector,
+    }
 
 
 def _classify_single_openai(
@@ -658,7 +776,7 @@ def _classify_single_openai(
                 ],
             },
         ],
-        max_tokens=120,
+        max_tokens=300,
         temperature=0.1,
     )
 
@@ -669,6 +787,11 @@ def _classify_single_openai(
     result = _parse_single_classify_response(raw)
     print(
         f"[ImageRecognizer][OpenAI][classify_single] assigned_slot='{result['assigned_slot']}', "
+        f"label='{result['label']}', "
+        f"emotion_vector={result.get('emotion_vector', {})}, "
+        f"eyebrow='{result.get('eyebrow_analysis', '')[:60]}', "
+        f"eye='{result.get('eye_analysis', '')[:60]}', "
+        f"mouth='{result.get('mouth_analysis', '')[:60]}', "
         f"probabilities={result['probabilities']}"
     )
     return result
@@ -755,6 +878,11 @@ def _classify_single_qwen(
     result = _parse_single_classify_response(raw)
     print(
         f"[ImageRecognizer][Qwen][classify_single] assigned_slot='{result['assigned_slot']}', "
+        f"label='{result['label']}', "
+        f"emotion_vector={result.get('emotion_vector', {})}, "
+        f"eyebrow='{result.get('eyebrow_analysis', '')[:60]}', "
+        f"eye='{result.get('eye_analysis', '')[:60]}', "
+        f"mouth='{result.get('mouth_analysis', '')[:60]}', "
         f"probabilities={result['probabilities']}"
     )
     return result
@@ -815,7 +943,9 @@ class ImageEmotionRecognizer:
             existing_emotions: 当前已有的情绪标签列表，帮助 AI 避免重复。
 
         Returns:
-            (emotion: str, classified: dict)
+            (label: str, emotion_vector: dict, classified: dict)
+            label: 唯一复合标签（如 happy_bright）
+            emotion_vector: 情绪百分比向量 {calm: 0.1, happy: 0.6, ...}
             classified 键为 "eo_mo"/"eo_mc"/"ec_mo"/"ec_mc"，值为 PIL Image 或 None。
         """
         if not images_list:
@@ -872,7 +1002,7 @@ class ImageEmotionRecognizer:
 
         Returns:
             与输入等长的列表，元素为分类结果字典或 None。
-            每个结果： {"assigned_slot": ..., "probabilities": {...}, "emotion": ...}
+            每个结果： {"assigned_slot": ..., "probabilities": {...}, "label": ..., "emotion_vector": ...}
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -895,7 +1025,7 @@ class ImageEmotionRecognizer:
                     results[idx] = res
                     print(
                         f"[ImageRecognizer] batch parallel: img#{idx+1} done -> "
-                        f"slot='{res['assigned_slot']}' emotion='{res['emotion']}'"
+                        f"slot='{res['assigned_slot']}' label='{res.get('label', '?')}'"
                     )
                 except Exception as exc:
                     img_idx = futures[future]

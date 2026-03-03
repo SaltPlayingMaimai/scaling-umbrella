@@ -74,6 +74,12 @@ def _init_session():
         st.session_state.audio_bytes = None
     if "audio_suffix" not in st.session_state:
         st.session_state.audio_suffix = ".wav"
+    # 情绪分析分段时长（秒）
+    if "segment_seconds" not in st.session_state:
+        st.session_state.segment_seconds = 1.0
+    # 强制切换表情秒数（0 = 不启用）
+    if "force_switch_seconds" not in st.session_state:
+        st.session_state.force_switch_seconds = 0.0
     # 批量上传模式（主流程）：4 张图同时上传、并行 AI 识别
     if "pending_batch_images" not in st.session_state:
         st.session_state.pending_batch_images = [None, None, None, None]
@@ -175,6 +181,29 @@ def _sidebar_config():
         help="越小越平滑（响应慢），越大越灵敏（可能抖动）",
     )
 
+    st.sidebar.subheader("🧠 情绪分析设置")
+    segment_seconds = st.sidebar.slider(
+        "分析片段时长（秒）",
+        min_value=0.1,
+        max_value=30.0,
+        value=st.session_state.segment_seconds,
+        step=0.1,
+        format="%.1f",
+        help="每隔多少秒调用一次 AI 进行情绪分析。越短越精细但消耗更多 token；默认 1 秒。",
+    )
+    st.session_state.segment_seconds = segment_seconds
+
+    force_switch_seconds = st.sidebar.slider(
+        "强制切换表情（秒）",
+        min_value=0.0,
+        max_value=30.0,
+        value=st.session_state.force_switch_seconds,
+        step=0.5,
+        format="%.1f",
+        help="同一表情持续超过此秒数后，在下一个句首强制切换到不同表情。0 = 不启用。",
+    )
+    st.session_state.force_switch_seconds = force_switch_seconds
+
     emotion_backend = st.sidebar.selectbox(
         "情绪识别后端",
         ["qwen", "rule", "openai"],
@@ -210,7 +239,14 @@ def _sidebar_config():
     cfg.blink_interval = blink_interval
     cfg.blink_duration = blink_duration
 
-    return fps, smoothing, emotion_backend, vision_backend
+    return (
+        fps,
+        smoothing,
+        emotion_backend,
+        vision_backend,
+        segment_seconds,
+        force_switch_seconds,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -261,6 +297,13 @@ def _tab_upload_assets():
 
                 # AI 调试数据
                 debug_list = st.session_state.emotion_debug_data.get(emotion)
+                # 情绪向量摘要
+                ev = config.emotion_vectors.get(emotion)
+                if ev:
+                    ev_str = " | ".join(
+                        f"{k}:{v*100:.0f}%" for k, v in ev.items() if v > 0.01
+                    )
+                    st.caption(f"🎯 情绪向量: {ev_str}")
                 with st.expander("🔍 AI 识别调试数据", expanded=False):
                     if debug_list:
                         dcols = st.columns(4)
@@ -269,10 +312,27 @@ def _tab_upload_assets():
                                 st.caption(f"**{_SLOT_CN[slot]}**")
                                 if ai_res is not None:
                                     probs = ai_res.get("probabilities", {})
-                                    emo_s = ai_res.get("emotion", "?")
+                                    label_s = ai_res.get("label", "?")
+                                    eyebrow_s = ai_res.get("eyebrow_analysis", "")
+                                    eye_s = ai_res.get("eye_analysis", "")
+                                    mouth_s = ai_res.get("mouth_analysis", "")
+                                    ev_s = ai_res.get("emotion_vector", {})
                                     ai_slot = ai_res.get("assigned_slot", "?")
-                                    st.caption(f"情绪: `{emo_s}`")
+                                    st.caption(f"标签: `{label_s}`")
                                     st.caption(f"AI判断: `{ai_slot}`")
+                                    if eyebrow_s:
+                                        st.caption(f"🤨 {eyebrow_s[:100]}")
+                                    if eye_s:
+                                        st.caption(f"👁️ {eye_s[:100]}")
+                                    if mouth_s:
+                                        st.caption(f"👄 {mouth_s[:100]}")
+                                    if ev_s:
+                                        ev_display = " ".join(
+                                            f"{k}:{v*100:.0f}%"
+                                            for k, v in ev_s.items()
+                                            if v > 0.01
+                                        )
+                                        st.caption(f"📊 {ev_display}")
                                     for s in _SLOT_ORDER:
                                         p = probs.get(s, 0.0)
                                         filled = int(p * 10)
@@ -284,12 +344,19 @@ def _tab_upload_assets():
                     else:
                         st.caption("_(该表情组无 AI 识别数据)_")
 
-                if st.button(f"🗑️ 删除「{emotion}」表情组", key=f"del_{emotion}"):
-                    config.remove_emotion(emotion)
-                    assets.remove_emotion_group(emotion)
-                    if emotion in st.session_state.emotion_debug_data:
-                        del st.session_state.emotion_debug_data[emotion]
-                    st.rerun()
+                # 操作按钮行
+                btn_cols = st.columns([1, 1, 2])
+                with btn_cols[0]:
+                    if st.button(f"🔄 重新分析", key=f"reanalyze_{emotion}"):
+                        _reanalyze_emotion_group(emotion)
+                        st.rerun()
+                with btn_cols[1]:
+                    if st.button(f"🗑️ 删除", key=f"del_{emotion}"):
+                        config.remove_emotion(emotion)
+                        assets.remove_emotion_group(emotion)
+                        if emotion in st.session_state.emotion_debug_data:
+                            del st.session_state.emotion_debug_data[emotion]
+                        st.rerun()
 
     st.divider()
 
@@ -322,7 +389,9 @@ def _tab_upload_assets():
                 result = st.session_state.pending_batch_results[idx]
                 caption = f"图片 {idx + 1}"
                 if result:
-                    caption += f"\n{result['emotion']} / {result['assigned_slot']}"
+                    caption += (
+                        f"\n{result.get('label', '?')} / {result['assigned_slot']}"
+                    )
                 st.image(img, width=120, caption=caption)
             else:
                 st.caption("⬜ 未上传")
@@ -394,9 +463,24 @@ def _tab_upload_assets():
                 if result:
                     probs = result["probabilities"]
                     ai_slot = result["assigned_slot"]
-                    ai_emo = result["emotion"]
+                    ai_label = result.get("label", "?")
                     st.caption(f"**AI 建议槽:** `{ai_slot}`")
-                    st.caption(f"**AI 情绪:** `{ai_emo}`")
+                    st.caption(f"**AI 标签:** `{ai_label}`")
+                    eyebrow_s = result.get("eyebrow_analysis", "")
+                    eye_s = result.get("eye_analysis", "")
+                    mouth_s = result.get("mouth_analysis", "")
+                    if eyebrow_s:
+                        st.caption(f"🤨 {eyebrow_s[:80]}")
+                    if eye_s:
+                        st.caption(f"👁️ {eye_s[:80]}")
+                    if mouth_s:
+                        st.caption(f"👄 {mouth_s[:80]}")
+                    ev_s = result.get("emotion_vector", {})
+                    if ev_s:
+                        ev_display = " ".join(
+                            f"{k}:{v*100:.0f}%" for k, v in ev_s.items() if v > 0.01
+                        )
+                        st.caption(f"📊 {ev_display}")
                     st.caption("---")
                     for s in _SLOT_ORDER:
                         p = probs.get(s, 0.0)
@@ -476,12 +560,15 @@ def _tab_upload_assets():
     # 自动推断情绪名：优先级 eo_mo > eo_mc > ec_mo > ec_mc
     # ─────────────────────────────────────────
     suggested_emotion = "unknown"
+    suggested_ev = {}
     for priority_slot in _SLOT_ORDER:
         if priority_slot in final_slot_map:
             img_idx, _ = final_slot_map[priority_slot]
             r = st.session_state.pending_batch_results[img_idx]
-            if r and r.get("emotion"):
-                suggested_emotion = r["emotion"]
+            if r:
+                # 使用 label（向量驱动，无文字情绪标签）
+                suggested_emotion = r.get("label") or "unknown"
+                suggested_ev = r.get("emotion_vector", {})
             break
 
     # ─────────────────────────────────────────
@@ -490,6 +577,11 @@ def _tab_upload_assets():
     st.divider()
     st.markdown("**📄 步骤 5 — 命名并确认**")
     st.caption(f"AI 建议情绪名（来自优先级最高的已分配槽位）：`{suggested_emotion}`")
+    if suggested_ev:
+        ev_str = " | ".join(
+            f"{k}:{v*100:.0f}%" for k, v in suggested_ev.items() if v > 0.01
+        )
+        st.info(f"🎯 情绪向量: {ev_str}")
 
     manual_label = st.text_input(
         "情绪名称（可修改）",
@@ -611,7 +703,22 @@ def _store_emotion_group_batch(label: str, classified: dict, debug_list: list):
         st.warning(f"⚠️ 表情「{label}」已存在，将覆盖旧素材。")
 
     assets.put_emotion_group(label, classified)
-    config.add_emotion(label)
+
+    # 从 AI 调试数据中提取情绪向量（优先级 eo_mo > eo_mc > ec_mo > ec_mc）
+    _SLOT_ORDER_LOCAL = ["eo_mo", "eo_mc", "ec_mo", "ec_mc"]
+    emotion_vector = None
+    for slot_idx, slot in enumerate(_SLOT_ORDER_LOCAL):
+        if (
+            debug_list
+            and slot_idx < len(debug_list)
+            and debug_list[slot_idx] is not None
+        ):
+            ev = debug_list[slot_idx].get("emotion_vector")
+            if ev:
+                emotion_vector = ev
+                break
+
+    config.add_emotion(label, emotion_vector=emotion_vector)
     st.session_state.emotion_debug_data[label] = debug_list
 
     # 清空所有 pending 状态
@@ -624,6 +731,68 @@ def _store_emotion_group_batch(label: str, classified: dict, debug_list: list):
 
     st.success(f"✅ 表情组「{label}」已添加！共 {len(config.emotions)} 组表情。")
     st.rerun()
+
+
+def _reanalyze_emotion_group(emotion: str):
+    """重新对已注册表情组的图片运行 AI 分析，更新情绪向量和调试数据。"""
+    config = st.session_state.config
+    assets = st.session_state.assets
+    vision_backend = st.session_state.get("vision_backend", "qwen")
+
+    _SLOT_ORDER_LOCAL = ["eo_mo", "eo_mc", "ec_mo", "ec_mc"]
+
+    # 收集该表情组的所有图片
+    images = []
+    for slot in _SLOT_ORDER_LOCAL:
+        key = f"{emotion}_{slot}"
+        if assets.has(key):
+            images.append(assets.get(key))
+        else:
+            images.append(None)
+
+    valid_images = [img for img in images if img is not None]
+    if not valid_images:
+        st.warning(f"表情组「{emotion}」没有可分析的图片。")
+        return
+
+    try:
+        from vtuber_engine.audio.image_recognizer import ImageEmotionRecognizer
+
+        recognizer = ImageEmotionRecognizer(
+            backend=vision_backend,
+            model=st.session_state.get("vision_model") or None,
+        )
+
+        # 对每张有效图片逐张分析
+        new_debug_list = []
+        for img in images:
+            if img is not None:
+                result = recognizer.classify_single(img)
+                new_debug_list.append(result)
+            else:
+                new_debug_list.append(None)
+
+        # 更新情绪向量（优先级 eo_mo > eo_mc > ec_mo > ec_mc）
+        emotion_vector = None
+        for slot_idx, slot in enumerate(_SLOT_ORDER_LOCAL):
+            if (
+                new_debug_list
+                and slot_idx < len(new_debug_list)
+                and new_debug_list[slot_idx] is not None
+            ):
+                ev = new_debug_list[slot_idx].get("emotion_vector")
+                if ev:
+                    emotion_vector = ev
+                    break
+
+        # 更新配置和调试数据
+        if emotion_vector:
+            config.add_emotion(emotion, emotion_vector=emotion_vector)
+        st.session_state.emotion_debug_data[emotion] = new_debug_list
+        st.success(f"✅ 表情组「{emotion}」重新分析完成！")
+
+    except Exception as e:
+        st.error(f"重新分析失败: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -707,7 +876,13 @@ def _generate_tts(text: str, voice: str) -> bytes:
 # ──────────────────────────────────────────────
 
 
-def _tab_generate(fps: int, smoothing: float, emotion_backend: str):
+def _tab_generate(
+    fps: int,
+    smoothing: float,
+    emotion_backend: str,
+    segment_seconds: float,
+    force_switch_seconds: float = 0.0,
+):
     """生成视频界面。"""
     config = st.session_state.config
     assets = st.session_state.assets
@@ -737,6 +912,12 @@ def _tab_generate(fps: int, smoothing: float, emotion_backend: str):
     for c in checks:
         st.markdown(c)
 
+    # 显示情绪分析片段配置
+    st.caption(
+        f"情绪分析：每 **{segment_seconds:.1f} 秒** 一个片段 | "
+        f"后端：{emotion_backend} | 帧率：{fps} fps"
+    )
+
     st.divider()
 
     if not ready:
@@ -744,10 +925,18 @@ def _tab_generate(fps: int, smoothing: float, emotion_backend: str):
         return
 
     if st.button("🎬 开始生成视频", type="primary", use_container_width=True):
-        _run_pipeline(fps, smoothing, emotion_backend)
+        _run_pipeline(
+            fps, smoothing, emotion_backend, segment_seconds, force_switch_seconds
+        )
 
 
-def _run_pipeline(fps: int, smoothing: float, emotion_backend: str):
+def _run_pipeline(
+    fps: int,
+    smoothing: float,
+    emotion_backend: str,
+    segment_seconds: float = 1.0,
+    force_switch_seconds: float = 0.0,
+):
     """执行完整生成管线。"""
     config = st.session_state.config
     assets = st.session_state.assets
@@ -774,14 +963,19 @@ def _run_pipeline(fps: int, smoothing: float, emotion_backend: str):
             available_emotions=config.emotions,
             model=st.session_state.text_model or None,
         )
-        emotion_vectors = emotion_engine.analyze(audio_features)
+        emotion_vectors = emotion_engine.analyze(
+            audio_features,
+            segment_seconds=segment_seconds,
+        )
         st.session_state.emotion_vectors = emotion_vectors
 
         # Step 3: 状态计算
         progress.progress(35, text="🎯 计算角色状态...")
         from vtuber_engine.core.state_engine import StateEngine
 
-        state_engine = StateEngine(config, fps=fps)
+        state_engine = StateEngine(
+            config, fps=fps, force_switch_seconds=force_switch_seconds
+        )
         states = state_engine.process(audio_features, emotion_vectors)
 
         # Step 4: 动画平滑
@@ -879,12 +1073,12 @@ def _show_analysis():
     # 音量波形
     if features.volume:
         st.markdown("**音量 (RMS)**")
-        st.line_chart(features.volume, height=150)
+        st.line_chart(list(features.volume), height=150)
 
     # 基频
     if features.pitch:
         st.markdown("**基频 (Hz)**")
-        st.line_chart(features.pitch, height=150)
+        st.line_chart(list(features.pitch), height=150)
 
     # 说话段
     if features.is_speaking:
@@ -903,16 +1097,10 @@ def _show_analysis():
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**情绪权重（中间时刻）**")
+            from vtuber_engine.models.data_models import EMOTION_KEYS
             emotion_data = {
-                "情绪": ["calm", "excited", "panic", "sad", "angry", "happy"],
-                "权重": [
-                    sample.calm,
-                    sample.excited,
-                    sample.panic,
-                    sample.sad,
-                    sample.angry,
-                    sample.happy,
-                ],
+                "情绪": EMOTION_KEYS,
+                "权重": [getattr(sample, k, 0.0) for k in EMOTION_KEYS],
             }
             st.bar_chart(emotion_data, x="情绪", y="权重", height=250)
 
@@ -1058,7 +1246,14 @@ def main():
     st.title("🎭 VTuber Engine")
     st.caption("AI 驱动 · 角色动画生成 · 绿幕视频输出")
 
-    fps, smoothing, emotion_backend, vision_backend = _sidebar_config()
+    (
+        fps,
+        smoothing,
+        emotion_backend,
+        vision_backend,
+        segment_seconds,
+        force_switch_seconds,
+    ) = _sidebar_config()
     st.session_state.vision_backend = vision_backend
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -1078,7 +1273,9 @@ def main():
         _tab_audio()
 
     with tab3:
-        _tab_generate(fps, smoothing, emotion_backend)
+        _tab_generate(
+            fps, smoothing, emotion_backend, segment_seconds, force_switch_seconds
+        )
 
     with tab4:
         _tab_preview()

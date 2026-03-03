@@ -5,11 +5,56 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from PIL import Image
+
+
+# ─────────────────────────────────────────────
+# 工具函数
+# ─────────────────────────────────────────────
+
+
+# 标准情绪维度（12 维）—— 所有模块共享此列表
+EMOTION_KEYS = [
+    "calm",
+    "happy",
+    "excited",
+    "sad",
+    "angry",
+    "panic",
+    "shy",
+    "surprised",
+    "tender",
+    "smug",
+    "tired",
+    "confused",
+]
+
+
+def cosine_similarity(vec_a, vec_b) -> float:
+    """计算两个情绪向量之间的余弦相似度（忽略 energy 字段）。
+
+    支持 Dict[str, float] 或 EmotionVector 对象。
+    返回值范围 [-1, 1]，1 表示完全相同方向。
+    """
+    keys = EMOTION_KEYS
+
+    def _get(v, k):
+        if isinstance(v, dict):
+            return v.get(k, 0.0)
+        return getattr(v, k, 0.0)
+
+    a_vals = [_get(vec_a, k) for k in keys]
+    b_vals = [_get(vec_b, k) for k in keys]
+
+    dot = sum(x * y for x, y in zip(a_vals, b_vals))
+    mag_a = math.sqrt(sum(x * x for x in a_vals)) or 1e-9
+    mag_b = math.sqrt(sum(x * x for x in b_vals)) or 1e-9
+    return dot / (mag_a * mag_b)
 
 
 # ─────────────────────────────────────────────
@@ -43,38 +88,34 @@ class AudioFeatures:
 
 @dataclass
 class EmotionVector:
-    """AI 情绪推理结果 — 纯抽象权重，不指定具体表情。"""
+    """AI 情绪推理结果 — 纯抽象权重，不指定具体表情。12 维情绪 + energy。"""
 
     calm: float = 0.0
+    happy: float = 0.0
     excited: float = 0.0
-    panic: float = 0.0
     sad: float = 0.0
     angry: float = 0.0
-    happy: float = 0.0
+    panic: float = 0.0
+    shy: float = 0.0
+    surprised: float = 0.0
+    tender: float = 0.0
+    smug: float = 0.0
+    tired: float = 0.0
+    confused: float = 0.0
     energy: float = 0.0  # 综合能量 0~1
 
     def dominant_emotion(self) -> str:
         """返回权重最高的情绪标签。"""
-        emotions = {
-            "calm": self.calm,
-            "excited": self.excited,
-            "panic": self.panic,
-            "sad": self.sad,
-            "angry": self.angry,
-            "happy": self.happy,
-        }
-        return max(emotions, key=emotions.get)
+        return max(EMOTION_KEYS, key=lambda k: getattr(self, k, 0.0))
 
     def as_dict(self) -> Dict[str, float]:
-        return {
-            "calm": self.calm,
-            "excited": self.excited,
-            "panic": self.panic,
-            "sad": self.sad,
-            "angry": self.angry,
-            "happy": self.happy,
-            "energy": self.energy,
-        }
+        d = {k: getattr(self, k, 0.0) for k in EMOTION_KEYS}
+        d["energy"] = self.energy
+        return d
+
+    def emotion_only_dict(self) -> Dict[str, float]:
+        """只返回情绪维度（不含 energy），用于余弦相似度比较。"""
+        return {k: getattr(self, k, 0.0) for k in EMOTION_KEYS}
 
 
 # ─────────────────────────────────────────────
@@ -161,6 +202,10 @@ class CharacterConfig:
     # 支持的表情状态列表 —— 动态构建，初始为空
     emotions: List[str] = field(default_factory=list)
 
+    # 每个表情对应的情绪向量 {emotion_label: {calm: 0.3, happy: 0.5, ...}}
+    # 由图片识别 AI 填充，用于和音频情绪向量做余弦相似度匹配
+    emotion_vectors: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
     mouth_threshold: float = 0.5  # mouth_open > threshold 则张嘴
     blink_interval: float = 3.0  # 眨眼间隔（秒）
     blink_duration: float = 0.15  # 单次眨眼时长（秒）
@@ -181,15 +226,20 @@ class CharacterConfig:
                     keys.append(self.image_key(emotion, eye, mouth))
         return keys
 
-    def add_emotion(self, emotion: str) -> None:
-        """添加一个新的表情状态（去重）。"""
+    def add_emotion(
+        self, emotion: str, emotion_vector: Optional[Dict[str, float]] = None
+    ) -> None:
+        """添加一个新的表情状态（去重）。可附带情绪向量。"""
         if emotion not in self.emotions:
             self.emotions.append(emotion)
+        if emotion_vector:
+            self.emotion_vectors[emotion] = emotion_vector
 
     def remove_emotion(self, emotion: str) -> None:
         """移除一个表情状态。"""
         if emotion in self.emotions:
             self.emotions.remove(emotion)
+        self.emotion_vectors.pop(emotion, None)
 
 
 # ─────────────────────────────────────────────
