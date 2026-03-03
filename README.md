@@ -180,16 +180,20 @@ scaling-umbrella/
 
 ### 阶段 2 — 增强
 - [ ] OpenAI 情绪后端
-- [ ] 多角色切换
 - [ ] 动作层（抬手等）
+- [ ] 角色抖动（蹦蹦跳跳）
+- [ ] 非张嘴支持（仅一张图的情况，毕竟不是所有人都想要角色张嘴的，那样太聒噪了Orz）
+- [ ] 多角色切换
 - [ ] 批量视频生成
 - [ ] 时间轴精细编辑
+- [ ] 状态切换的过度动画 - Optional
+- [ ] Emoji视频支持 - Optional
+- [ ] Emoji乱飘表达情绪 - Optional
 
 ### 阶段 3 — 引擎升级
-- [ ] 接入 Unity / Godot
+- [ ] 接入 Unity / Godot（Aka，Live2D支持）
 - [ ] Python ↔ 引擎 WebSocket
-- [ ] 类 Live2D 动画控制
-- [ ] 实时音频驱动
+- [ ] 实时音频驱动（Real-Time TTS）
 
 ### 阶段 4 — 工具化
 - [ ] 可视化调参 GUI

@@ -151,13 +151,15 @@ class CharacterConfig:
       - 眼闭 + 嘴闭  (ec_mc)
 
     图片键名格式: "{emotion}_eo_mo" / "{emotion}_eo_mc" 等
+
+    emotions 列表由用户上传素材后、AI 识别动态构建，不再预设。
     """
 
     name: str = "unnamed"
     resolution: tuple = (1080, 1920)  # (宽, 高)
 
-    # 支持的表情状态列表
-    emotions: List[str] = field(default_factory=lambda: ["calm", "excited", "panic"])
+    # 支持的表情状态列表 —— 动态构建，初始为空
+    emotions: List[str] = field(default_factory=list)
 
     mouth_threshold: float = 0.5  # mouth_open > threshold 则张嘴
     blink_interval: float = 3.0  # 眨眼间隔（秒）
@@ -178,6 +180,16 @@ class CharacterConfig:
                 for mouth in [True, False]:
                     keys.append(self.image_key(emotion, eye, mouth))
         return keys
+
+    def add_emotion(self, emotion: str) -> None:
+        """添加一个新的表情状态（去重）。"""
+        if emotion not in self.emotions:
+            self.emotions.append(emotion)
+
+    def remove_emotion(self, emotion: str) -> None:
+        """移除一个表情状态。"""
+        if emotion in self.emotions:
+            self.emotions.remove(emotion)
 
 
 # ─────────────────────────────────────────────
@@ -211,3 +223,35 @@ class UploadedAssets:
     def missing_keys(self, config: CharacterConfig) -> List[str]:
         """返回尚未上传的图片键名列表。"""
         return [k for k in config.all_image_keys() if not self.has(k)]
+
+    def put_emotion_group(self, emotion: str, images_dict: Dict[str, Any]) -> None:
+        """
+        一次性存入一组表情的 4 张图片。
+
+        Args:
+            emotion: 表情名称（如 "happy"）。
+            images_dict: 键为 "eo_mo"/"eo_mc"/"ec_mo"/"ec_mc"，值为 PIL Image。
+        """
+        for suffix, img in images_dict.items():
+            key = f"{emotion}_{suffix}"
+            self.images[key] = img
+
+    def remove_emotion_group(self, emotion: str) -> None:
+        """移除一组表情的所有图片。"""
+        keys_to_remove = [k for k in self.images if k.startswith(f"{emotion}_")]
+        for k in keys_to_remove:
+            del self.images[k]
+
+    def get_emotion_group(self, emotion: str) -> Dict[str, Any]:
+        """获取一组表情的所有图片。"""
+        prefix = f"{emotion}_"
+        return {k: v for k, v in self.images.items() if k.startswith(prefix)}
+
+    def emotion_group_complete(self, emotion: str) -> bool:
+        """检查一组表情的 4 张图片是否都有。"""
+        for eye in [True, False]:
+            for mouth in [True, False]:
+                key = CharacterConfig.image_key(emotion, eye, mouth)
+                if not self.has(key):
+                    return False
+        return True

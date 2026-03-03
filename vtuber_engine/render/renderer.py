@@ -128,9 +128,12 @@ class Renderer:
 
         key = CharacterConfig.image_key(state.emotion, eye_open, mouth_open)
 
-        # 如果该情绪没有对应素材，回退到 calm
+        # 如果该情绪没有对应素材，回退到第一个可用表情
         if not self.assets.has(key):
-            key = CharacterConfig.image_key("calm", eye_open, mouth_open)
+            fallback_emotion = (
+                self.config.emotions[0] if self.config.emotions else state.emotion
+            )
+            key = CharacterConfig.image_key(fallback_emotion, eye_open, mouth_open)
 
         return RenderFrame(image_key=key)
 

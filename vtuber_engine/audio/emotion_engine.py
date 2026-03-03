@@ -12,27 +12,42 @@ Emotion Engine — AI 情绪推理模块。
 支持后端：
   - "rule"    — 基于规则的简易情绪映射（无需 API）
   - "openai"  — 调用 OpenAI API 多模态推理
+  - "qwen"    — 调用通义千问 Qwen API（通过 DashScope）
 """
 
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
+from dotenv import load_dotenv
 
 from vtuber_engine.models.data_models import AudioFeatures, EmotionVector
+
+# 加载 .env
+load_dotenv()
 
 
 class EmotionEngine:
     """AI 情绪推理引擎。"""
 
-    def __init__(self, backend: str = "rule"):
+    def __init__(
+        self,
+        backend: str = "rule",
+        available_emotions: Optional[List[str]] = None,
+        model: Optional[str] = None,
+    ):
         """
         Args:
-            backend: 推理后端，"rule" 或 "openai"。
+            backend: 推理后端，"rule"、"openai" 或 "qwen"。
+            available_emotions: 用户已上传的表情名称列表（用于约束 AI 输出）。
+            model: 指定调用的模型名称，None 时使用各后端默认值。
         """
         self.backend = backend
+        self.available_emotions = available_emotions or []
+        # 模型名称：None 则各后端内部默认
+        self.model = model
 
         if backend == "openai":
             try:
@@ -41,6 +56,14 @@ class EmotionEngine:
                 raise ImportError(
                     "openai package is required for the openai backend. "
                     "Install it with: pip install openai"
+                )
+        elif backend == "qwen":
+            try:
+                import dashscope  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "dashscope package is required for the qwen backend. "
+                    "Install it with: pip install dashscope"
                 )
 
     # ──────────────────── 公共接口 ────────────────────
@@ -67,6 +90,8 @@ class EmotionEngine:
             return self._analyze_rule(audio_features)
         elif self.backend == "openai":
             return self._analyze_openai(audio_features, text)
+        elif self.backend == "qwen":
+            return self._analyze_qwen(audio_features, text)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
 
@@ -156,15 +181,30 @@ class EmotionEngine:
 
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required.")
+            raise ValueError(
+                "OPENAI_API_KEY 未设置。请在 .env 文件中配置 OPENAI_API_KEY=sk-xxx"
+            )
 
-        client = openai.OpenAI(api_key=api_key)
+        base_url = os.environ.get("OPENAI_BASE_URL", None)
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        client = openai.OpenAI(**kwargs)
 
         # 构建提示
         prompt = self._build_emotion_prompt(features, text)
 
+        # 动态构建 system prompt，告诉 AI 可用的表情列表
+        emotion_constraint = ""
+        if self.available_emotions:
+            emotion_constraint = (
+                f"\nThe available emotion labels are: {', '.join(self.available_emotions)}. "
+                "You MUST pick from these labels only. "
+            )
+
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=self.model or "gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
@@ -174,6 +214,7 @@ class EmotionEngine:
                         "Keys: calm, excited, panic, sad, angry, happy, energy. "
                         "All values are floats between 0 and 1. "
                         "Do not output anything else."
+                        f"{emotion_constraint}"
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -181,9 +222,20 @@ class EmotionEngine:
             temperature=0.3,
         )
 
+        if response is None:
+            raise ValueError("OpenAI API 返回了空响应。请检查 API Key 和网络连接。")
+        if not response.choices or response.choices[0] is None:
+            raise ValueError("OpenAI API 返回了无效的 choices。请重试。")
+        if response.choices[0].message is None:
+            raise ValueError("OpenAI API 返回了无效的 message。请重试。")
+
         import json
 
-        raw = response.choices[0].message.content.strip()
+        raw = response.choices[0].message.content
+        if not raw:
+            raise ValueError("OpenAI API 返回了空的 message 内容。请重试。")
+
+        raw = raw.strip()
         data = json.loads(raw)
 
         base_emotion = EmotionVector(
@@ -230,3 +282,100 @@ class EmotionEngine:
             parts.append(f"Transcript: {text}")
 
         return "\n".join(parts)
+
+    # ──────────────────── Qwen (DashScope) 后端 ────────────────────
+
+    def _analyze_qwen(
+        self,
+        features: AudioFeatures,
+        text: Optional[str] = None,
+    ) -> list[EmotionVector]:
+        """
+        调用通义千问 Qwen API 进行情绪推理。
+        """
+        import dashscope
+        import json
+
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "DASHSCOPE_API_KEY 未设置。请在 .env 文件中配置 DASHSCOPE_API_KEY=sk-xxx"
+            )
+
+        base_url = os.environ.get(
+            "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
+        )
+        dashscope.base_http_api_url = base_url
+
+        prompt = self._build_emotion_prompt(features, text)
+
+        emotion_constraint = ""
+        if self.available_emotions:
+            emotion_constraint = (
+                f"\nThe available emotion labels are: {', '.join(self.available_emotions)}. "
+                "You MUST pick from these labels only. "
+            )
+
+        system_content = (
+            "You are an emotion analysis engine. "
+            "Given audio features and optional text, output emotion weights as JSON. "
+            "Keys: calm, excited, panic, sad, angry, happy, energy. "
+            "All values are floats between 0 and 1. "
+            "Do not output anything else."
+            f"{emotion_constraint}"
+        )
+
+        response = dashscope.Generation.call(
+            api_key=api_key,
+            model=self.model or "qwen-plus",
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": prompt},
+            ],
+            result_format="message",
+        )
+
+        if response is None:
+            raise ValueError("Qwen API 返回了空响应。请检查 API Key 和网络连接。")
+        if not hasattr(response, "output") or response.output is None:
+            raise ValueError("Qwen API 返回了无效的 output。请重试。")
+        if not response.output.choices or response.output.choices[0] is None:
+            raise ValueError("Qwen API 返回了无效的 choices。请重试。")
+        if response.output.choices[0].message is None:
+            raise ValueError("Qwen API 返回了无效的 message。请重试。")
+
+        raw = response.output.choices[0].message.content
+        if not raw:
+            raise ValueError("Qwen API 返回了空的 message 内容。请重试。")
+
+        raw = raw.strip()
+        # 处理可能被 markdown 包裹的 JSON
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        data = json.loads(raw)
+
+        base_emotion = EmotionVector(
+            calm=data.get("calm", 0.0),
+            excited=data.get("excited", 0.0),
+            panic=data.get("panic", 0.0),
+            sad=data.get("sad", 0.0),
+            angry=data.get("angry", 0.0),
+            happy=data.get("happy", 0.0),
+            energy=data.get("energy", 0.0),
+        )
+
+        # 广播到所有帧，energy 按帧变化
+        results = []
+        for i in range(features.frame_count):
+            frame_emotion = EmotionVector(
+                calm=base_emotion.calm,
+                excited=base_emotion.excited,
+                panic=base_emotion.panic,
+                sad=base_emotion.sad,
+                angry=base_emotion.angry,
+                happy=base_emotion.happy,
+                energy=features.volume[i] if i < len(features.volume) else 0.0,
+            )
+            results.append(frame_emotion)
+
+        return results

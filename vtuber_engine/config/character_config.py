@@ -50,7 +50,7 @@ def create_default_config() -> CharacterConfig:
     return CharacterConfig(
         name="my_oc",
         resolution=(1080, 1920),
-        emotions=["calm", "excited", "panic"],
+        emotions=[],  # 动态构建，不再预设
         mouth_threshold=0.5,
         blink_interval=3.0,
         blink_duration=0.15,

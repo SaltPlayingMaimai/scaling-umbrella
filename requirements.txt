@@ -3,6 +3,7 @@ numpy>=1.24.0
 Pillow>=10.0.0
 pyyaml>=6.0
 ffmpeg-python>=0.2.0
+python-dotenv>=1.0.0
 
 # ─── UI ───
 streamlit>=1.30.0
@@ -14,9 +15,9 @@ soundfile>=0.12.0
 # ─── TTS ───
 edge-tts>=6.1.0
 
-# ─── AI / Emotion (optional — rule backend works without these) ───
-# openai>=1.0.0
-# openai-whisper>=20230918
+# ─── AI / Emotion & Image Recognition ───
+openai>=1.0.0
+dashscope>=1.14.0
 
 # ─── Dev ───
 # pytest>=7.0
