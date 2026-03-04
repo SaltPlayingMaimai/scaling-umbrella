@@ -41,6 +41,13 @@ from vtuber_engine.models.data_models import (
     CharacterConfig,
     UploadedAssets,
 )
+from vtuber_engine.config.character_store import (
+    delete_character,
+    get_app_data_dir,
+    list_saved_characters,
+    load_character,
+    save_character,
+)
 
 # ──────────────────── 页面配置 ────────────────────
 
@@ -329,10 +336,107 @@ def _sidebar_config():
 # ──────────────────────────────────────────────
 
 
+def _section_persistence():
+    """
+    角色持久化面板：保存当前角色 / 载入已保存的角色。
+    展示在「上传素材」标签页顶部。
+    """
+    config = st.session_state.config
+    assets = st.session_state.assets
+
+    store_dir = get_app_data_dir()
+    saved = list_saved_characters()
+
+    with st.expander(
+        f"💾 角色存档——已保存 {len(saved)} 个角色（存储: {store_dir}）",
+        expanded=not bool(config.emotions),  # 没有表情时自动展开
+    ):
+        # ── 保存当前 ──
+        st.markdown("**💾 保存当前角色**")
+        if config.emotions:
+            save_name = st.text_input(
+                "角色名称",
+                value=config.name,
+                key="_persist_save_name",
+                label_visibility="collapsed",
+                placeholder="角色名称",
+            )
+            save_col1, save_col2 = st.columns([2, 1])
+            with save_col1:
+                if st.button(
+                    "  保存当前角色到本地",
+                    key="_btn_save_char",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    # 同步名称到 config
+                    if save_name.strip():
+                        config.name = save_name.strip()
+                    try:
+                        saved_path = save_character(config, assets, overwrite=True)
+                        st.success(f"✅ 已保存「{config.name}」到：" f"`{saved_path}`")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"保存失败：{e}")
+            with save_col2:
+                st.caption(
+                    f"共 {len(config.emotions)} 组表情 | "
+                    f"{len(assets.images)} 张图片"
+                )
+        else:
+            st.caption("暂无表情组，请先上传并注册表情后再保存。")
+
+        st.divider()
+
+        # ── 载入已保存角色 ──
+        st.markdown("**📂 载入已保存的角色**")
+        if not saved:
+            st.caption("暂无已保存的角色。")
+        else:
+            for char_name in saved:
+                row = st.columns([3, 1, 1])
+                with row[0]:
+                    st.markdown(f"🎤 `{char_name}`")
+                with row[1]:
+                    if st.button(
+                        "载入",
+                        key=f"_btn_load_{char_name}",
+                        use_container_width=True,
+                    ):
+                        try:
+                            new_cfg, new_assets = load_character(char_name)
+                            # 替换 session state
+                            st.session_state.config = new_cfg
+                            st.session_state.assets = new_assets
+                            # 清空 emotion_debug_data（旧的调试数据已不匹配）
+                            st.session_state.emotion_debug_data = {
+                                e: None for e in new_cfg.emotions
+                            }
+                            st.success(
+                                f"✅ 已载入「{char_name}」："
+                                f"{len(new_cfg.emotions)} 组表情、"
+                                f"{len(new_assets.images)} 张图片"
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"载入失败：{e}")
+                with row[2]:
+                    if st.button(
+                        "🗑️ 删除",
+                        key=f"_btn_del_{char_name}",
+                        use_container_width=True,
+                    ):
+                        delete_character(char_name)
+                        st.rerun()
+
+
 def _tab_upload_assets():
     """素材上传界面 — 批量上传（最多4张）+ AI 并行识别 + 手动拖拽调整分配。"""
     config = st.session_state.config
     assets = st.session_state.assets
+
+    _section_persistence()
+    st.divider()
 
     st.markdown(
         """

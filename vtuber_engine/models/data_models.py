@@ -161,6 +161,7 @@ class AnimatedState:
     gesture: int = 0
     expression_weights: Dict[str, float] = field(default_factory=dict)
     bounce_offset: float = 0.0  # 垂直跳动偏移（像素，正值=向上跳）
+    squash_stretch: float = 0.0  # 果冻形变系数：+1=最大拉伸，-1=最大压扁，0=正常
 
 
 # ─────────────────────────────────────────────

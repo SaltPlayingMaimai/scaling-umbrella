@@ -148,13 +148,14 @@ class Renderer:
         for i, (h, state) in enumerate(hash_to_state.items()):
             self._frame_cache[h] = self._render_single(state)
 
-        # 第三步：按顺序组装（并应用跳动偏移）
+        # 第三步：按顺序组装（并应用果冻跳动）
         frames = []
         for i, h in enumerate(hashes):
             base = self._frame_cache[h]
             bounce_px = int(round(getattr(states[i], "bounce_offset", 0.0)))
-            if bounce_px != 0:
-                frames.append(self._apply_bounce(base, bounce_px))
+            squash_stretch = float(getattr(states[i], "squash_stretch", 0.0))
+            if bounce_px != 0 or abs(squash_stretch) > 0.01:
+                frames.append(self._apply_jelly_bounce(base, bounce_px, squash_stretch))
             else:
                 frames.append(base)
             if progress_callback and i % 30 == 0:
@@ -191,8 +192,9 @@ class Renderer:
             h = self._hash_state(state)
             base = self._frame_cache[h]
             bounce_px = int(round(getattr(state, "bounce_offset", 0.0)))
-            if bounce_px != 0:
-                yield self._apply_bounce(base, bounce_px)
+            squash_stretch = float(getattr(state, "squash_stretch", 0.0))
+            if bounce_px != 0 or abs(squash_stretch) > 0.01:
+                yield self._apply_jelly_bounce(base, bounce_px, squash_stretch)
             else:
                 yield base
             if progress_callback and i % 30 == 0:
@@ -312,28 +314,67 @@ class Renderer:
         """清空帧缓存。"""
         self._frame_cache.clear()
 
-    # ──────────────────── 跳动偏移 ────────────────────
+    # ──────────────────── 果冻 Q弹跳动 ────────────────────
 
-    def _apply_bounce(self, base_img: Image.Image, bounce_px: int) -> Image.Image:
+    def _apply_jelly_bounce(
+        self, base_img: Image.Image, bounce_px: int, squash_stretch: float
+    ) -> Image.Image:
         """
-        在已渲染的基础帧上应用垂直跳动偏移。
+        在已渲染的基础帧上同时应用：
+          1. Squash-Stretch 果冻形变：
+               squash_stretch > 0 → 纵向拉伸（越高越细）
+               squash_stretch < 0 → 纵向压扁（越扁越宽）
+          2. 垂直跳动偏移（bounce_px，正值=向上）
 
-        bounce_px > 0 表示角色向上跳。
-        使用 PIL crop+paste 避免大 numpy 数组的频繁拷贝分配。
-        基础帧缓存不受影响，跳动作为轻量级后处理。
+        锚点：画布底部居中（脚部固定）。
+        绿幕输出时绿色区域不影响后期抠图。
         """
-        if bounce_px == 0:
+        w, h = self.resolution
+
+        # ── 计算形变比例 ──
+        # squash_stretch 范围约 -0.55 ~ +0.90，先 clamp
+        ss = max(-0.55, min(1.0, squash_stretch))
+
+        # 纵向：+1 → +18% 高，-0.55 → -10% 矮
+        sy = 1.0 + 0.18 * ss
+        # 横向：与纵向反相关（面积近似守恒）
+        sx = 1.0 - 0.10 * ss
+
+        # 安全夹中
+        sy = max(0.88, min(1.22, sy))
+        sx = max(0.91, min(1.10, sx))
+
+        needs_transform = abs(sy - 1.0) > 0.008 or abs(sx - 1.0) > 0.008
+
+        if not needs_transform and bounce_px == 0:
             return base_img
 
-        w, h = self.resolution
-        bounce_px = max(0, min(bounce_px, h - 1))
+        new_w = max(1, int(round(w * sx)))
+        new_h = max(1, int(round(h * sy)))
 
-        # 从 base_img 中裁出去掉底部 bounce_px 行的内容（即向上移动 bounce_px）
-        # crop box: (left, upper, right, lower)
-        cropped = base_img.crop((0, bounce_px, w, h))
+        if needs_transform:
+            # 双线性插值：速度与质量的最佳平衡
+            scaled = base_img.resize((new_w, new_h), Image.BILINEAR)
+        else:
+            scaled = base_img
+            new_w, new_h = w, h
 
-        # 新建一张绑幕大小的绿幕，将裁剪内容贴到顶部
-        # 底部剩余的 bounce_px 行自动保持绿色
         canvas = Image.new("RGBA", (w, h), CHROMA_GREEN)
-        canvas.paste(cropped, (0, 0))
+
+        # 水平居中，垂直底部对齐 + 跳动偏移
+        paste_x = (w - new_w) // 2
+        paste_y = h - new_h - max(0, bounce_px)
+
+        # 裁剪超出画布的部分（拉伸时顶部可能超出）
+        src_x1 = max(0, -paste_x)
+        src_y1 = max(0, -paste_y)
+        src_x2 = min(new_w, w - paste_x)
+        src_y2 = min(new_h, h - paste_y)
+        dst_x1 = max(0, paste_x)
+        dst_y1 = max(0, paste_y)
+
+        if src_x2 > src_x1 and src_y2 > src_y1:
+            region = scaled.crop((src_x1, src_y1, src_x2, src_y2))
+            canvas.paste(region, (dst_x1, dst_y1))
+
         return canvas

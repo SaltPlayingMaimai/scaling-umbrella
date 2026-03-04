@@ -55,6 +55,7 @@ class AnimationEngine:
         self._bounce_amplitude = bounce_amplitude
         self._bounce_timer: float = 0.0
         self._current_bounce: float = 0.0
+        self._current_squash_stretch: float = 0.0  # 果冻形变系数
 
     # ──────────────────── 公共接口 ────────────────────
 
@@ -114,7 +115,7 @@ class AnimationEngine:
         self._current.gesture = target.gesture
         self._current.expression_weights = dict(target.expression_weights)
 
-        # 讲话跳动
+        # 讲话跳动 + 果冻形变
         self._current.bounce_offset = self._compute_bounce(target.mouth_open)
 
         # 返回快照
@@ -126,6 +127,7 @@ class AnimationEngine:
             gesture=self._current.gesture,
             expression_weights=dict(self._current.expression_weights),
             bounce_offset=round(self._current.bounce_offset, 2),
+            squash_stretch=round(self._current_squash_stretch, 4),
         )
 
     def _mouth_smoothing(self, target: CharacterState) -> float:
@@ -148,29 +150,61 @@ class AnimationEngine:
 
     def _compute_bounce(self, mouth_open: float) -> float:
         """
-        计算讲话时的弹性跳动偏移。
+        计算讲话时的弹性跳动偏移，同时更新果冻形变系数。
 
         口型打开时（speaking）驱动跳动动画；
         口型关闭时平滑衰减回 0。
+
+        果冻 squash-stretch 逻辑：
+          - 起跳/落地瞬间（接近地面）→ 横向扩张 + 纵向压缩（squash, 负值）
+          - 腾空上升 → 纵向拉伸 + 横向收窄（stretch, 正值）
+          - 弹性副振荡叠加高频抖动，给整体增加 Q 弹感
         """
         if not self._bounce_enabled:
+            self._current_squash_stretch = 0.0
             return 0.0
 
         if mouth_open > 0.01:  # 正在讲话
             self._bounce_timer += self._dt
             t = self._bounce_timer * self._bounce_frequency
-            # 主跳动: abs(sin) 产生类似弹球的上下运动
+
+            # 主跳动高度：abs(sin) 产生类似弹球的上下运动
             base = abs(math.sin(math.pi * t))
-            # 弹性副振荡: 叠加高频微振让跳动感更有弹性
+            # 弹性副振荡：叠加高频微振让跳动感更有弹性
             elastic = 1.0 + 0.15 * math.sin(2 * math.pi * t * 3)
             bounce = max(0.0, base * elastic) * self._bounce_amplitude
             self._current_bounce = bounce
+
+            # ── 果冻形变系数计算 ──
+            # 速度方向：cos(π·t) 正=向上，负=向下
+            vel = math.cos(math.pi * t)
+            # 归一化高度 0（地面） ~ 1（顶点）
+            height_norm = base  # = abs(sin(pi*t))
+            # 接近地面程度（加速度驱动 squash 感）
+            near_ground = (1.0 - height_norm) ** 2
+
+            # 拉伸：腾空时向上伸长
+            stretch_component = height_norm * 0.9
+            # 压扁：落地/起跳瞬间横向扩张（只在接近地面且速度为负/零时触发）
+            squash_component = near_ground * 0.6 * max(0.0, -vel + 0.3)
+            # 弹性高频颤动（叠加在基础形变上，增加 Q 感）
+            jelly_wobble = 0.08 * math.sin(2 * math.pi * t * 2.5)
+
+            raw_ss = stretch_component - squash_component + jelly_wobble
+            # 平滑过渡（避免形变跳变）
+            self._current_squash_stretch += (
+                raw_ss - self._current_squash_stretch
+            ) * min(1.0, self._dt * 18.0)
+
         else:
             # 不讲话时平滑衰减
             self._current_bounce *= 0.85
+            self._current_squash_stretch *= 0.80
             if abs(self._current_bounce) < 0.5:
                 self._current_bounce = 0.0
                 self._bounce_timer = 0.0
+                self._current_squash_stretch = 0.0
             bounce = self._current_bounce
+            return bounce
 
         return bounce
