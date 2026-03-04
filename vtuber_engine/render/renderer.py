@@ -351,8 +351,10 @@ class Renderer:
         # ss > 0 → 高瘦（纵向拉伸 + 横向收窄）
         # ss < 0 → 矮胖（纵向压扁 + 横向拉宽） → “向上压扁”
         ss = max(-0.3, min(0.3, squash_stretch))
-        sy = max(0.95, min(1.05, 1.0 + 0.15 * ss))  # 纵向 ±4.5%
-        sx = max(0.95, min(1.05, 1.0 - 0.15 * ss))  # 横向 ±4.5%（与纵向完全互补）
+        _fy = float(getattr(self.config, 'squash_stretch_factor', 0.1))
+        _fx = float(getattr(self.config, 'squash_stretch_factor_x', 0.15))
+        sy = max(0.7, min(1.3, 1.0 + _fy * ss))  # 纵向（可配置）
+        sx = max(0.7, min(1.3, 1.0 - _fx * ss))  # 横向（可配置）
 
         if abs(sy - 1.0) > 0.005 or abs(sx - 1.0) > 0.005:
             new_w = max(1, int(round(char_w * sx)))

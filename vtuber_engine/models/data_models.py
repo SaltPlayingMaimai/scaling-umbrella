@@ -215,7 +215,16 @@ class CharacterConfig:
     # 讲话跳动效果
     bounce_enabled: bool = True  # 是否启用讲话跳动
     bounce_frequency: float = 1.0  # 跳动频率 (Hz)
-    bounce_amplitude: float = 8.0  # 跳动幅度（像素）
+    bounce_amplitude: float = 30.0  # 跳动幅度（像素）
+    squash_stretch_factor: float = 0.1  # 纵向形变强度（0=无形变，0.3=夸张）
+    squash_stretch_factor_x: float = 0.15  # 横向形变强度（0=无形变，0.3=夸张）
+
+    # 灵动模式（连跳+冷静交替，更有生命感）
+    bounce_lively_mode: bool = False  # 是否启用灵动模式
+    lively_burst_min: int = 2  # 每次连跳最少次数
+    lively_burst_max: int = 5  # 每次连跳最多次数
+    lively_cooldown_min: float = 1.5  # 冷静期最短秒数
+    lively_cooldown_max: float = 3.0  # 冷静期最长秒数
 
     @staticmethod
     def image_key(emotion: str, eye_open: bool, mouth_open: bool) -> str:

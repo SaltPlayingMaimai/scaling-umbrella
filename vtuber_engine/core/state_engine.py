@@ -25,6 +25,7 @@ State Engine — 角色状态决策核心。
 from __future__ import annotations
 
 import math
+import random
 from typing import Optional
 
 from vtuber_engine.models.data_models import (
@@ -46,8 +47,8 @@ class StateEngine:
         force_switch_seconds: float = 0.0,
         gesture_min_hold_seconds: float = 5.0,
         emotion_min_hold_seconds: float = 5.0,
-        mouth_frequency: float = 2.5,
-    ):
+            mouth_frequency: float = 3.5,
+        ):
         """
         Args:
             character_config: 角色配置。
@@ -55,7 +56,7 @@ class StateEngine:
             force_switch_seconds: 强制切换表情的最长秒数（0 = 不启用）。
             gesture_min_hold_seconds: 动作切换后最小停留秒数（防止跳变）。
             emotion_min_hold_seconds: 每个表情最少保持秒数（防止频繁切换）。
-            mouth_frequency: 嘴型开合频率 (Hz)，越低越自然。
+            mouth_frequency: 嘴型单音节基准频率 (Hz)，实际频率会随音量和随机扰动变化。
         """
         self.config = character_config
         self.fps = fps
@@ -77,15 +78,23 @@ class StateEngine:
         self._gesture_hold_frames: int = 0
         self._gesture_min_hold_frames: int = max(1, int(gesture_min_hold_seconds * fps))
 
-        # 嘴巴开合振荡定时器（讲话时张嘴闭嘴切换，而不是一直张嘴）
-        self._mouth_timer: float = 0.0
+        # 嘴巴开合单音节模型（随机化头尾 + 音量教动频率）
+        self._mouth_timer: float = 0.0  # 保留，备用
         self._mouth_frequency: float = mouth_frequency
+        self._mouth_syllable_timer: float = 0.0    # 当前音节已经过的时间
+        self._mouth_syllable_duration: float = 0.0 # 当前音节总时长（0表示立即触发）
+        self._mouth_is_open_phase: bool = False    # 当前音节是张嘴还是闭嘴
 
         # 表情使用历史（用于降权，避免始终停留在同一表情）
         self._emotion_usage: dict[str, float] = {}
         self._emotion_decay: float = 0.995  # 每帧衰减系数
         self._emotion_penalty_factor: float = 0.003  # 每单位使用量的惩罚系数
         self._emotion_penalty_cap: float = 0.3  # 最大惩罚比例 (30%)
+
+        # 待生效表情（眨眼后切换）
+        self._pending_emotion: str = ""  # 计划切换到的表情，空字符串=无待切换
+        self._pending_force: bool = False  # 是否为强制切换模式
+        self._blink_crossed_peak: bool = False  # 本次眨眼是否已过峰值（用于峰值切换表情）
 
     # ──────────────────── 公共接口 ────────────────────
 
@@ -289,14 +298,14 @@ class StateEngine:
         is_sentence_start = is_speaking and not self._prev_is_speaking
         if is_sentence_start:
             print(
-                f"[StateEngine] emotion_switch: '{self._current_emotion}' -> '{matched}' "
-                f"at sentence boundary (held {elapsed:.1f}s, force={force_mode})"
+                f"[StateEngine] emotion_pending: '{self._current_emotion}' -> '{matched}' "
+                f"at sentence boundary (held {elapsed:.1f}s, force={force_mode}) — waiting for blink"
             )
-            self._current_emotion = matched
-            self._current_emotion_frames = 0
-            return matched
+            # 不立即切换：等眨眼完成后再切换，避免生硬
+            self._pending_emotion = matched
+            self._pending_force = force_mode
 
-        # 还没到句子边界，保持当前表情
+        # 保持当前表情（实际切换由 _compute_frame_state 在眨眼结束时完成）
         return self._current_emotion
 
     # ──────────────────── 内部逻辑 ────────────────────
@@ -318,20 +327,93 @@ class StateEngine:
         # 2. 能量
         state.energy = emotion.energy
 
-        # 3. 嘴型（讲话时张嘴闭嘴切换，而非一直张嘴）
+        # 3. 嘴型（单音节模型：随机化开合时序 + 音量停顿检测）
+        PAUSE_VOL = 0.04  # 音量低于此阁值视为停顿，就算 is_speaking=True
         if is_speaking:
-            self._mouth_timer += dt
-            freq = self._mouth_frequency
-            phase = math.sin(2 * math.pi * freq * self._mouth_timer)
-            # 正半周期张嘴，负半周期闭嘴，创造明显的开合节奏
-            mouth_envelope = max(0.0, phase)
-            state.mouth_open = mouth_envelope * min(1.0, volume * 2.0)
+            if volume < PAUSE_VOL:
+                # 停顿璬：强制闭嘴，重置音节计时器以便恢复时立即张嘴
+                state.mouth_open = 0.0
+                self._mouth_syllable_timer = 0.0
+                self._mouth_syllable_duration = 0.0
+                self._mouth_is_open_phase = False
+            else:
+                # 正常发音：单音节切换模型
+                # 实际频率随音量适度提升（较大声音 = 较快开合）
+                vol_factor = 0.75 + volume * 0.5   # 范围 0.75 ~ 1.25
+                eff_freq = max(0.5, self._mouth_frequency * vol_factor)
+                # 半周期基准时长（开/闭各占一个半周期）
+                base_half = 1.0 / (2.0 * eff_freq)
+
+                self._mouth_syllable_timer += dt
+                if self._mouth_syllable_timer >= self._mouth_syllable_duration:
+                    # 切换到下一个音节阶段
+                    overflow = self._mouth_syllable_timer - self._mouth_syllable_duration
+                    self._mouth_is_open_phase = not self._mouth_is_open_phase
+                    # 随机化持续时长：开嘴 60-140% 基准值，闭嘴 50-130% 基准值
+                    if self._mouth_is_open_phase:
+                        jitter = random.uniform(0.6, 1.4)
+                    else:
+                        jitter = random.uniform(0.5, 1.3)
+                    self._mouth_syllable_duration = max(0.04, base_half * jitter)
+                    self._mouth_syllable_timer = min(overflow, self._mouth_syllable_duration)
+
+                if self._mouth_is_open_phase:
+                    # 张嘴：幅度随音量调山
+                    state.mouth_open = min(1.0, volume * 2.0)
+                else:
+                    state.mouth_open = 0.0
         else:
             state.mouth_open = 0.0
-            self._mouth_timer = 0.0  # 不讲话时重置计时器
+            self._mouth_timer = 0.0
+            self._mouth_syllable_timer = 0.0
+            self._mouth_syllable_duration = 0.0
+            self._mouth_is_open_phase = False
 
-        # 4. 眨眼
+        # 4. 眨眼 + 待切换表情处理
+        # 如果有待切换表情且当前没有眨眼，主动触发一次眨眼以掩盖切换
+        if self._pending_emotion and not self._blink_active:
+            self._blink_active = True
+            self._blink_timer = 0.0
+            self._blink_progress = 0.0
+            self._blink_crossed_peak = False  # 新眨眼，重置峰值标志
+
+        was_blink_active = self._blink_active
+        prog_before = self._blink_progress  # 记录本帧调用前的进度
         state.blink_phase = self._update_blink(dt, state.energy)
+        blink_just_finished = was_blink_active and not self._blink_active
+
+        # 检测自然眨眼在 _update_blink 内触发（was_blink_active=False 但现在=True）
+        if not was_blink_active and self._blink_active:
+            self._blink_crossed_peak = False
+
+        # 检测本帧是否刚过峰值（blink_progress 从 <0.5 跨到 >=0.5）
+        blink_at_peak = (
+            self._blink_active
+            and not self._blink_crossed_peak
+            and prog_before < 0.5 <= self._blink_progress
+        )
+        if blink_at_peak:
+            self._blink_crossed_peak = True
+        if blink_just_finished:
+            self._blink_crossed_peak = False  # 本次眨眼结束，清除标志
+
+        # 在眨眼峰值（眼睛最闭合）时切换表情 —— 睁眼时即呈现新表情
+        # 兜底：若峰值未捕获（极短眨眼），在眨眼结束时切换
+        should_switch = self._pending_emotion and (
+            blink_at_peak
+            or (blink_just_finished and not self._blink_crossed_peak)
+        )
+        if should_switch:
+            print(
+                f"[StateEngine] emotion_switch at blink {'peak' if blink_at_peak else 'end (fallback)'}: "
+                f"'{self._current_emotion}' -> '{self._pending_emotion}' "
+                f"(force={self._pending_force})"
+            )
+            self._current_emotion = self._pending_emotion
+            self._current_emotion_frames = 0
+            self._pending_emotion = ""
+            self._pending_force = False
+            state.emotion = self._current_emotion  # 立即刷新本帧 emotion
 
         # 5. 动作
         state.gesture = self._decide_gesture(state.energy)

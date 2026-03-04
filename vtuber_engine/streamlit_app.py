@@ -210,9 +210,69 @@ def _sidebar_config():
             step=1.0,
             help="跳动的最大高度（像素）",
         )
+        squash_stretch_factor = st.sidebar.slider(
+            "纵向拉伸强度",
+            0.0,
+            0.3,
+            value=st.session_state.config.squash_stretch_factor,
+            step=0.01,
+            format="%.2f",
+            help="讲话时纵向果冻幅度。0 = 无形变，0.1 = 细微，0.3 = 夸张。",
+        )
+        squash_stretch_factor_x = st.sidebar.slider(
+            "横向拉伸强度",
+            0.0,
+            0.3,
+            value=st.session_state.config.squash_stretch_factor_x,
+            step=0.01,
+            format="%.2f",
+            help="讲话时横向果冻幅度。0 = 无形变，0.15 = 细微，0.3 = 夸张。",
+        )
+        bounce_lively_mode = st.sidebar.checkbox(
+            "灵动模式",
+            value=st.session_state.config.bounce_lively_mode,
+            help="开始说话时连跳 2~5 下，然后冷静一段时间再跳，更灵动活泼。",
+        )
+        if bounce_lively_mode:
+            lively_col1, lively_col2 = st.sidebar.columns(2)
+            with lively_col1:
+                lively_burst_min = st.number_input(
+                    "连跳最少", min_value=1, max_value=10,
+                    value=st.session_state.config.lively_burst_min, step=1,
+                )
+                lively_cooldown_min = st.number_input(
+                    "冷静最短(s)", min_value=0.5, max_value=10.0,
+                    value=st.session_state.config.lively_cooldown_min, step=0.5,
+                )
+            with lively_col2:
+                lively_burst_max = st.number_input(
+                    "连跳最多", min_value=1, max_value=10,
+                    value=st.session_state.config.lively_burst_max, step=1,
+                )
+                lively_cooldown_max = st.number_input(
+                    "冷静最长(s)", min_value=0.5, max_value=10.0,
+                    value=st.session_state.config.lively_cooldown_max, step=0.5,
+                )
+            # 确保 min <= max
+            if lively_burst_min > lively_burst_max:
+                lively_burst_min, lively_burst_max = lively_burst_max, lively_burst_min
+            if lively_cooldown_min > lively_cooldown_max:
+                lively_cooldown_min, lively_cooldown_max = lively_cooldown_max, lively_cooldown_min
+        else:
+            lively_burst_min = st.session_state.config.lively_burst_min
+            lively_burst_max = st.session_state.config.lively_burst_max
+            lively_cooldown_min = st.session_state.config.lively_cooldown_min
+            lively_cooldown_max = st.session_state.config.lively_cooldown_max
     else:
         bounce_frequency = st.session_state.config.bounce_frequency
         bounce_amplitude = st.session_state.config.bounce_amplitude
+        squash_stretch_factor = st.session_state.config.squash_stretch_factor
+        squash_stretch_factor_x = st.session_state.config.squash_stretch_factor_x
+        bounce_lively_mode = st.session_state.config.bounce_lively_mode
+        lively_burst_min = st.session_state.config.lively_burst_min
+        lively_burst_max = st.session_state.config.lively_burst_max
+        lively_cooldown_min = st.session_state.config.lively_cooldown_min
+        lively_cooldown_max = st.session_state.config.lively_cooldown_max
 
     fps = st.sidebar.selectbox("视频帧率", [24, 30, 60], index=1)
     smoothing = st.sidebar.slider(
@@ -317,6 +377,13 @@ def _sidebar_config():
     cfg.bounce_enabled = bounce_enabled
     cfg.bounce_frequency = bounce_frequency
     cfg.bounce_amplitude = bounce_amplitude
+    cfg.squash_stretch_factor = squash_stretch_factor
+    cfg.squash_stretch_factor_x = squash_stretch_factor_x
+    cfg.bounce_lively_mode = bounce_lively_mode
+    cfg.lively_burst_min = int(lively_burst_min)
+    cfg.lively_burst_max = int(lively_burst_max)
+    cfg.lively_cooldown_min = float(lively_cooldown_min)
+    cfg.lively_cooldown_max = float(lively_cooldown_max)
 
     return (
         fps,
@@ -1197,6 +1264,12 @@ def _run_pipeline(
             bounce_enabled=config.bounce_enabled,
             bounce_frequency=config.bounce_frequency,
             bounce_amplitude=config.bounce_amplitude,
+            squash_stretch_factor=config.squash_stretch_factor,
+            bounce_lively_mode=config.bounce_lively_mode,
+            lively_burst_min=config.lively_burst_min,
+            lively_burst_max=config.lively_burst_max,
+            lively_cooldown_min=config.lively_cooldown_min,
+            lively_cooldown_max=config.lively_cooldown_max,
         )
         animated_states = anim_engine.process(states)
         timings["动画平滑"] = _time.perf_counter() - t0
