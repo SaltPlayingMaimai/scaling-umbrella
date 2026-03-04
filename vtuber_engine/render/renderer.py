@@ -347,12 +347,12 @@ class Renderer:
 
         char_w, char_h = char_img.width, char_img.height
 
-        # ── 形变比例（上下 & 左右互补配合） ──
+        # ── 形变比例（上下 & 左右互补配合，细微果冻感） ──
         # ss > 0 → 高瘦（纵向拉伸 + 横向收窄）
-        # ss < 0 → 矮胖（纵向压扁 + 横向拉宽）
-        ss = max(-0.6, min(0.6, squash_stretch))
-        sy = max(0.90, min(1.12, 1.0 + 0.12 * ss))  # 纵向 ±6%
-        sx = max(0.90, min(1.10, 1.0 - 0.10 * ss))  # 横向 ±5%（与纵向互补）
+        # ss < 0 → 矮胖（纵向压扁 + 横向拉宽） → “向上压扁”
+        ss = max(-0.3, min(0.3, squash_stretch))
+        sy = max(0.95, min(1.05, 1.0 + 0.15 * ss))  # 纵向 ±4.5%
+        sx = max(0.95, min(1.05, 1.0 - 0.15 * ss))  # 横向 ±4.5%（与纵向完全互补）
 
         if abs(sy - 1.0) > 0.005 or abs(sx - 1.0) > 0.005:
             new_w = max(1, int(round(char_w * sx)))

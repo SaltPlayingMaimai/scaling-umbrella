@@ -152,18 +152,21 @@ class AnimationEngine:
         """
         计算讲话时的弹跳偏移 + squash-stretch 系数。
 
-        非对称弹跳节奏（每个周期内）：
+        非对称弹跳节奏（基于 60fps 12+8+8 帧设计，比例自适应 fps）：
           ┌─ 上升阶段 (占 5/7 ≈ 71% 周期) ──────────────────┐
-          │  前段（12/28）: 起跳+拉高，稍快                   │
-          │  后段（8/28） : 接近峰值+最大拉伸，自然减速       │
+          │  前段(12/28): 起跳+拉高，稍快                    │
+          │  后段(8/28) : 拉高+起跳，自然减速                │
           └──────────────────────────────────────────────────┘
           ┌─ 下降阶段 (占 2/7 ≈ 29% 周期) ──────────────────┐
-          │  压扁+快速降落（8/28）                            │
+          │  压扁+降落，稍快但不闪现                         │
           └──────────────────────────────────────────────────┘
 
-        实现：非对称余弦缓动（两段半余弦拼接）。
-        上升/峰值/下降/着地四个关键点速度均为 0 → 全程 C¹ 平滑。
-        形变 squash-stretch 直接跟随 height，上下左右互补配合。
+        Squash-stretch 基于"速度"而非"高度"：
+          • 上升中（vel > 0）→ ss < 0 → 压扁（矮宽）→ "向上压扁"感
+          • 最高点 (vel = 0) → ss = 0 → 中性
+          • 下降中（vel < 0）→ ss > 0 → 拉伸（高瘦）
+          • 着地点 (vel = 0) → ss = 0 → 中性（初始状态不被压扁）
+        周期边界处速度均为 0，无闪现跳变。
         """
         if not self._bounce_enabled:
             self._current_squash_stretch = 0.0
@@ -177,30 +180,32 @@ class AnimationEngine:
             t_cycle = t % 1.0
 
             # ── 非对称弹跳曲线 ──
-            # 上升占 5/7 周期（慢起跳，缓到顶），下降占 2/7 周期（快落地）
-            # 两段各用半余弦缓动 → 地面/峰值处导数均为 0 → C¹ 无缝衔接
-            RISE = 5.0 / 7.0  # 上升占比
+            # 上升 5/7 周期（对应 60fps 下 20 帧），下降 2/7 周期（8 帧）
+            # 两段各用半余弦缓动 → 地面/峰值处导数均为 0 → C¹ 平滑
+            RISE = 5.0 / 7.0  # 上升占比 71.4%
 
             if t_cycle < RISE:
                 # 上升阶段：余弦缓入缓出
-                # phase 0→1 映射到 height 0→1
-                # 前 60% 上升较快（起跳+拉高），后 40% 自然减速（接近峰值）
-                phase = t_cycle / RISE
+                phase = t_cycle / RISE  # 0 → 1
                 height = 0.5 * (1.0 - math.cos(math.pi * phase))
+                # 归一化速度：sin(π·phase)，在 phase=0 和 1 处为 0
+                vel = math.sin(math.pi * phase)  # 正值 = 上升
             else:
-                # 下降阶段：余弦快降
-                # phase 0→1 映射到 height 1→0
-                phase = (t_cycle - RISE) / (1.0 - RISE)
+                # 下降阶段：余弦缓入缓出
+                phase = (t_cycle - RISE) / (1.0 - RISE)  # 0 → 1
                 height = 0.5 * (1.0 + math.cos(math.pi * phase))
+                # 归一化速度：-sin(π·phase)，负值 = 下降
+                vel = -math.sin(math.pi * phase)
 
             bounce = height * self._bounce_amplitude
             self._current_bounce = bounce
 
-            # ── 形变：直接跟随高度 ──
-            # 着地 height=0 → ss=-0.5 → 矮胖（横向拉宽 + 纵向压扁）
-            # 最高 height=1 → ss=+0.5 → 高瘦（纵向拉长 + 横向收窄）
-            # 上下左右互补配合，与弹跳完全同步
-            self._current_squash_stretch = (2.0 * height - 1.0) * 0.5
+            # ── 形变：跟随速度（细微果冻感） ──
+            # vel > 0 (上升) → ss < 0 → 压扁(矮宽) → "向上压扁"
+            # vel = 0 (峰值/地面) → ss = 0 → 中性
+            # vel < 0 (下降) → ss > 0 → 拉伸(高瘦)
+            # 幅度 0.20 = 细微差别，只是有果冻感而不夸张
+            self._current_squash_stretch = -vel * 0.20
 
         else:
             # 停止讲话：平滑衰减回静止

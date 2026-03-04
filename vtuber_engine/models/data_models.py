@@ -214,7 +214,7 @@ class CharacterConfig:
 
     # 讲话跳动效果
     bounce_enabled: bool = True  # 是否启用讲话跳动
-    bounce_frequency: float = 3.0  # 跳动频率 (Hz)
+    bounce_frequency: float = 1.0  # 跳动频率 (Hz)
     bounce_amplitude: float = 8.0  # 跳动幅度（像素）
 
     @staticmethod

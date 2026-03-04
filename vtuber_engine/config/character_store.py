@@ -215,7 +215,7 @@ def load_character(name: str) -> Tuple[CharacterConfig, UploadedAssets]:
         blink_interval=data.get("blink_interval", 3.0),
         blink_duration=data.get("blink_duration", 0.15),
         bounce_enabled=data.get("bounce_enabled", True),
-        bounce_frequency=data.get("bounce_frequency", 3.0),
+        bounce_frequency=data.get("bounce_frequency", 1.0),
         bounce_amplitude=data.get("bounce_amplitude", 8.0),
     )
 
