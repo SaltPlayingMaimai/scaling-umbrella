@@ -30,7 +30,7 @@ class AnimationEngine:
         smoothing: float = 0.2,
         fps: int = 30,
         bounce_enabled: bool = True,
-        bounce_frequency: float = 3.0,
+        bounce_frequency: float = 1.0,
         bounce_amplitude: float = 8.0,
     ):
         """
@@ -150,15 +150,20 @@ class AnimationEngine:
 
     def _compute_bounce(self, mouth_open: float) -> float:
         """
-        计算讲话时的弹性跳动偏移，同时更新果冻形变系数。
+        计算讲话时的弹跳偏移 + squash-stretch 系数。
 
-        口型打开时（speaking）驱动跳动动画；
-        口型关闭时平滑衰减回 0。
+        非对称弹跳节奏（每个周期内）：
+          ┌─ 上升阶段 (占 5/7 ≈ 71% 周期) ──────────────────┐
+          │  前段（12/28）: 起跳+拉高，稍快                   │
+          │  后段（8/28） : 接近峰值+最大拉伸，自然减速       │
+          └──────────────────────────────────────────────────┘
+          ┌─ 下降阶段 (占 2/7 ≈ 29% 周期) ──────────────────┐
+          │  压扁+快速降落（8/28）                            │
+          └──────────────────────────────────────────────────┘
 
-        果冻 squash-stretch 逻辑：
-          - 起跳/落地瞬间（接近地面）→ 横向扩张 + 纵向压缩（squash, 负值）
-          - 腾空上升 → 纵向拉伸 + 横向收窄（stretch, 正值）
-          - 弹性副振荡叠加高频抖动，给整体增加 Q 弹感
+        实现：非对称余弦缓动（两段半余弦拼接）。
+        上升/峰值/下降/着地四个关键点速度均为 0 → 全程 C¹ 平滑。
+        形变 squash-stretch 直接跟随 height，上下左右互补配合。
         """
         if not self._bounce_enabled:
             self._current_squash_stretch = 0.0
@@ -168,43 +173,42 @@ class AnimationEngine:
             self._bounce_timer += self._dt
             t = self._bounce_timer * self._bounce_frequency
 
-            # 主跳动高度：abs(sin) 产生类似弹球的上下运动
-            base = abs(math.sin(math.pi * t))
-            # 弹性副振荡：叠加高频微振让跳动感更有弹性
-            elastic = 1.0 + 0.15 * math.sin(2 * math.pi * t * 3)
-            bounce = max(0.0, base * elastic) * self._bounce_amplitude
+            # 周期内位置 [0, 1)
+            t_cycle = t % 1.0
+
+            # ── 非对称弹跳曲线 ──
+            # 上升占 5/7 周期（慢起跳，缓到顶），下降占 2/7 周期（快落地）
+            # 两段各用半余弦缓动 → 地面/峰值处导数均为 0 → C¹ 无缝衔接
+            RISE = 5.0 / 7.0  # 上升占比
+
+            if t_cycle < RISE:
+                # 上升阶段：余弦缓入缓出
+                # phase 0→1 映射到 height 0→1
+                # 前 60% 上升较快（起跳+拉高），后 40% 自然减速（接近峰值）
+                phase = t_cycle / RISE
+                height = 0.5 * (1.0 - math.cos(math.pi * phase))
+            else:
+                # 下降阶段：余弦快降
+                # phase 0→1 映射到 height 1→0
+                phase = (t_cycle - RISE) / (1.0 - RISE)
+                height = 0.5 * (1.0 + math.cos(math.pi * phase))
+
+            bounce = height * self._bounce_amplitude
             self._current_bounce = bounce
 
-            # ── 果冻形变系数计算 ──
-            # 速度方向：cos(π·t) 正=向上，负=向下
-            vel = math.cos(math.pi * t)
-            # 归一化高度 0（地面） ~ 1（顶点）
-            height_norm = base  # = abs(sin(pi*t))
-            # 接近地面程度（加速度驱动 squash 感）
-            near_ground = (1.0 - height_norm) ** 2
-
-            # 拉伸：腾空时向上伸长
-            stretch_component = height_norm * 0.9
-            # 压扁：落地/起跳瞬间横向扩张（只在接近地面且速度为负/零时触发）
-            squash_component = near_ground * 0.6 * max(0.0, -vel + 0.3)
-            # 弹性高频颤动（叠加在基础形变上，增加 Q 感）
-            jelly_wobble = 0.08 * math.sin(2 * math.pi * t * 2.5)
-
-            raw_ss = stretch_component - squash_component + jelly_wobble
-            # 平滑过渡（避免形变跳变）
-            self._current_squash_stretch += (
-                raw_ss - self._current_squash_stretch
-            ) * min(1.0, self._dt * 18.0)
+            # ── 形变：直接跟随高度 ──
+            # 着地 height=0 → ss=-0.5 → 矮胖（横向拉宽 + 纵向压扁）
+            # 最高 height=1 → ss=+0.5 → 高瘦（纵向拉长 + 横向收窄）
+            # 上下左右互补配合，与弹跳完全同步
+            self._current_squash_stretch = (2.0 * height - 1.0) * 0.5
 
         else:
-            # 不讲话时平滑衰减
+            # 停止讲话：平滑衰减回静止
             self._current_bounce *= 0.85
-            self._current_squash_stretch *= 0.80
+            self._current_squash_stretch *= 0.85
             if abs(self._current_bounce) < 0.5:
                 self._current_bounce = 0.0
                 self._bounce_timer = 0.0
                 self._current_squash_stretch = 0.0
-            bounce = self._current_bounce
-            return bounce
 
-        return bounce
+        return self._current_bounce

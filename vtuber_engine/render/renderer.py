@@ -103,10 +103,11 @@ class Renderer:
             # 缓存
             self._frame_cache[state_hash] = base
 
-        # 应用跳动偏移
+        # 应用跳动 + 形变
         bounce_px = int(round(getattr(state, "bounce_offset", 0.0)))
-        if bounce_px != 0:
-            return self._apply_bounce(base, bounce_px)
+        squash_stretch = float(getattr(state, "squash_stretch", 0.0))
+        if bounce_px != 0 or abs(squash_stretch) > 0.01:
+            return self._apply_jelly_bounce(state, bounce_px, squash_stretch)
         return base
 
     def render_sequence(
@@ -155,7 +156,9 @@ class Renderer:
             bounce_px = int(round(getattr(states[i], "bounce_offset", 0.0)))
             squash_stretch = float(getattr(states[i], "squash_stretch", 0.0))
             if bounce_px != 0 or abs(squash_stretch) > 0.01:
-                frames.append(self._apply_jelly_bounce(base, bounce_px, squash_stretch))
+                frames.append(
+                    self._apply_jelly_bounce(states[i], bounce_px, squash_stretch)
+                )
             else:
                 frames.append(base)
             if progress_callback and i % 30 == 0:
@@ -194,7 +197,7 @@ class Renderer:
             bounce_px = int(round(getattr(state, "bounce_offset", 0.0)))
             squash_stretch = float(getattr(state, "squash_stretch", 0.0))
             if bounce_px != 0 or abs(squash_stretch) > 0.01:
-                yield self._apply_jelly_bounce(base, bounce_px, squash_stretch)
+                yield self._apply_jelly_bounce(state, bounce_px, squash_stretch)
             else:
                 yield base
             if progress_callback and i % 30 == 0:
@@ -232,6 +235,19 @@ class Renderer:
 
         return RenderFrame(image_key=key)
 
+    # ────────────────── 内部工具 ──────────────────
+
+    def _get_headroom(self, char_h: int) -> int:
+        """
+        计算预留的顶部余量（角色向下偏移量）。
+        余量 = 最大跳动偏移 + 最大拉伸高度，保证画面内不截角色顶部。
+        """
+        if not getattr(self.config, "bounce_enabled", False):
+            return 0
+        max_bounce = int(self.config.bounce_amplitude)
+        max_stretch = int(char_h * 0.18)  # 18% 纵向拉伸最大値
+        return max_bounce + max_stretch
+
     # ──────────────────── 合成 ────────────────────
 
     def _compose(self, render_frame: RenderFrame) -> Image.Image:
@@ -252,13 +268,8 @@ class Renderer:
             canvas_np = self._green_bg_np.copy()
             char_np = np.asarray(char_img)
 
-            # 居中放置；若启用跳动，将角色向下偏移 bounce_amplitude 像素，
-            # 为向上弹跳预留顶部余量，避免跳动时裁切角色顶部像素。
-            bounce_headroom = (
-                int(self.config.bounce_amplitude)
-                if getattr(self.config, "bounce_enabled", False)
-                else 0
-            )
+            # 居中放置；向下偏移 headroom，为跳动+拉伸预留顶部空间
+            bounce_headroom = self._get_headroom(char_img.height)
             x = (w - char_img.width) // 2
             y = (h - char_img.height) // 2 + bounce_headroom
 
@@ -291,11 +302,7 @@ class Renderer:
 
         # PIL 回退路径
         canvas = self._green_bg_pil.copy()
-        bounce_headroom = (
-            int(self.config.bounce_amplitude)
-            if getattr(self.config, "bounce_enabled", False)
-            else 0
-        )
+        bounce_headroom = self._get_headroom(char_img.height)
         x = (w - char_img.width) // 2
         y = (h - char_img.height) // 2 + bounce_headroom
         canvas.paste(char_img, (x, y), mask=char_img)
@@ -314,67 +321,58 @@ class Renderer:
         """清空帧缓存。"""
         self._frame_cache.clear()
 
-    # ──────────────────── 果冻 Q弹跳动 ────────────────────
+    # ────────────────── Q弹跳动应用 ──────────────────
 
     def _apply_jelly_bounce(
-        self, base_img: Image.Image, bounce_px: int, squash_stretch: float
+        self, state: AnimatedState, bounce_px: int, squash_stretch: float
     ) -> Image.Image:
         """
-        在已渲染的基础帧上同时应用：
-          1. Squash-Stretch 果冻形变：
-               squash_stretch > 0 → 纵向拉伸（越高越细）
-               squash_stretch < 0 → 纵向压扁（越扁越宽）
-          2. 垂直跳动偏移（bounce_px，正值=向上）
+        只对角色贴图本身做 squash-stretch 缩放，再合成到绳幕。
 
-        锚点：画布底部居中（脚部固定）。
-        绿幕输出时绿色区域不影响后期抠图。
+        设计原则：
+          - 不缩放整块画布（避免截图）—只缩放角色贴图自身
+          - 脚底霨点固定（与 _compose 基准位置一致）
+          - bounce_px 负责億直轻跳，squash_stretch 负责形变
+          - 贴图如超出画布上边为自然渗出（不切剪贴图本身）
         """
         w, h = self.resolution
 
-        # ── 计算形变比例 ──
-        # squash_stretch 范围约 -0.55 ~ +0.90，先 clamp
-        ss = max(-0.55, min(1.0, squash_stretch))
+        # 获取角色贴图
+        rf = self._resolve_image(state)
+        char_img = self.assets.get(rf.image_key)
+        if char_img is None:
+            return self._green_bg_pil.copy()
+        if char_img.mode != "RGBA":
+            char_img = char_img.convert("RGBA")
 
-        # 纵向：+1 → +18% 高，-0.55 → -10% 矮
-        sy = 1.0 + 0.18 * ss
-        # 横向：与纵向反相关（面积近似守恒）
-        sx = 1.0 - 0.10 * ss
+        char_w, char_h = char_img.width, char_img.height
 
-        # 安全夹中
-        sy = max(0.88, min(1.22, sy))
-        sx = max(0.91, min(1.10, sx))
+        # ── 形变比例（上下 & 左右互补配合） ──
+        # ss > 0 → 高瘦（纵向拉伸 + 横向收窄）
+        # ss < 0 → 矮胖（纵向压扁 + 横向拉宽）
+        ss = max(-0.6, min(0.6, squash_stretch))
+        sy = max(0.90, min(1.12, 1.0 + 0.12 * ss))  # 纵向 ±6%
+        sx = max(0.90, min(1.10, 1.0 - 0.10 * ss))  # 横向 ±5%（与纵向互补）
 
-        needs_transform = abs(sy - 1.0) > 0.008 or abs(sx - 1.0) > 0.008
-
-        if not needs_transform and bounce_px == 0:
-            return base_img
-
-        new_w = max(1, int(round(w * sx)))
-        new_h = max(1, int(round(h * sy)))
-
-        if needs_transform:
-            # 双线性插值：速度与质量的最佳平衡
-            scaled = base_img.resize((new_w, new_h), Image.BILINEAR)
+        if abs(sy - 1.0) > 0.005 or abs(sx - 1.0) > 0.005:
+            new_w = max(1, int(round(char_w * sx)))
+            new_h = max(1, int(round(char_h * sy)))
+            scaled = char_img.resize((new_w, new_h), Image.BILINEAR)
         else:
-            scaled = base_img
-            new_w, new_h = w, h
+            scaled = char_img
+            new_w, new_h = char_w, char_h
 
-        canvas = Image.new("RGBA", (w, h), CHROMA_GREEN)
+        # ── 堑算脚底霨点 Y（与 _compose 居中+headroom 公式一致） ──
+        headroom = self._get_headroom(char_h)
+        # _compose 中： top_y = (h - char_h)//2 + headroom
+        # 脚底 = top_y + char_h = (h + char_h)//2 + headroom
+        foot_y = (h + char_h) // 2 + headroom
 
-        # 水平居中，垂直底部对齐 + 跳动偏移
+        # 脚底固定，向上跳动
         paste_x = (w - new_w) // 2
-        paste_y = h - new_h - max(0, bounce_px)
+        paste_y = foot_y - new_h - bounce_px
 
-        # 裁剪超出画布的部分（拉伸时顶部可能超出）
-        src_x1 = max(0, -paste_x)
-        src_y1 = max(0, -paste_y)
-        src_x2 = min(new_w, w - paste_x)
-        src_y2 = min(new_h, h - paste_y)
-        dst_x1 = max(0, paste_x)
-        dst_y1 = max(0, paste_y)
-
-        if src_x2 > src_x1 and src_y2 > src_y1:
-            region = scaled.crop((src_x1, src_y1, src_x2, src_y2))
-            canvas.paste(region, (dst_x1, dst_y1))
-
+        # 在绳幕上合成（PIL paste 自然处理画布边缘，贴图本身不内截剪）
+        canvas = Image.new("RGBA", (w, h), CHROMA_GREEN)
+        canvas.paste(scaled, (paste_x, paste_y), mask=scaled)
         return canvas
